@@ -13,6 +13,13 @@
     </button>
     <div id="brand"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linejoin="round"><g transform="translate(1.25 1.05) scale(1.12)" stroke-width="1.25"><path d="M0.3 3.4 C-0.2 2.9 -0.15 1.6 0.6 1.0 C1.6 0.2 3.2 0 5 0 C6.8 0 8.4 0.2 9.4 1.0 C10.15 1.6 10.2 2.9 9.7 3.4 L9.7 8 Q9.7 10 7.7 10 L2.3 10 Q0.3 10 0.3 8 Z" transform="translate(2.1 0)" /><path d="M0.3 3.4 C-0.2 2.9 -0.15 1.6 0.6 1.0 C1.6 0.2 3.2 0 5 0 C6.8 0 8.4 0.2 9.4 1.0 C10.15 1.6 10.2 2.9 9.7 3.4 L9.7 8 Q9.7 10 7.7 10 L2.3 10 Q0.3 10 0.3 8 Z" transform="translate(0 2.4)" /></g></svg><span>Pane</span></div>
     <div id="tabs"></div>
+    <div id="find" hidden>
+      <input id="find-q" type="text" placeholder="Find in page" spellcheck="false" autocomplete="off">
+      <span id="find-n"></span>
+      <button data-find="prev" title="Previous (Shift+Enter)"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5l3-3 3 3"/></svg></button>
+      <button data-find="next" title="Next (Enter)"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5l3 3 3-3"/></svg></button>
+      <button data-find="close" title="Close (Esc)"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2 2l6 6M8 2l-6 6"/></svg></button>
+    </div>
   </header>
 
   <main id="home">
@@ -21,14 +28,20 @@
       <p id="hint" class="hint" hidden></p>
 
       <div class="apps">
-        <section id="local-sec" hidden>
-          <h2 class="section-label">This computer</h2>
-          <div id="local" class="grid"></div>
+        <section id="pin-sec" hidden>
+          <div id="pinned" class="grid"></div>
         </section>
-        <section id="net-sec" hidden>
-          <h2 class="section-label">Network</h2>
-          <div id="net" class="grid"></div>
-        </section>
+        <div id="rest">
+          <section id="local-sec" hidden>
+            <h2 class="section-label">This computer</h2>
+            <div id="local" class="grid"></div>
+          </section>
+          <section id="net-sec" hidden>
+            <h2 class="section-label">Network</h2>
+            <div id="net" class="grid"></div>
+          </section>
+          <p id="pin-hint" class="pin-hint" hidden>Right-click an app and choose <b>Pin to top</b> to keep it here, even while it isn’t running.</p>
+        </div>
         <div id="empty" class="empty" hidden>
           <svg class="empty-mark" width="44" height="44" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linejoin="round"><g transform="translate(1.25 1.05) scale(1.12)" stroke-width="1.25"><path d="M0.3 3.4 C-0.2 2.9 -0.15 1.6 0.6 1.0 C1.6 0.2 3.2 0 5 0 C6.8 0 8.4 0.2 9.4 1.0 C10.15 1.6 10.2 2.9 9.7 3.4 L9.7 8 Q9.7 10 7.7 10 L2.3 10 Q0.3 10 0.3 8 Z" transform="translate(2.1 0)" /><path d="M0.3 3.4 C-0.2 2.9 -0.15 1.6 0.6 1.0 C1.6 0.2 3.2 0 5 0 C6.8 0 8.4 0.2 9.4 1.0 C10.15 1.6 10.2 2.9 9.7 3.4 L9.7 8 Q9.7 10 7.7 10 L2.3 10 Q0.3 10 0.3 8 Z" transform="translate(0 2.4)" /></g></svg>
           <b>No apps running</b>
@@ -80,6 +93,11 @@
         <h3>Saved logins</h3>
         <p class="note" id="m-backend"></p>
         <div id="m-logins"></div>
+      </section>
+      <section data-sec="permissions">
+        <h3>Permissions</h3>
+        <p class="note">What apps were allowed or blocked. Forget one to be asked again.</p>
+        <div id="m-perms"></div>
       </section>
     </div>
   </dialog>

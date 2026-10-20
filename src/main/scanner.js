@@ -50,9 +50,10 @@ async function listLinux() {
     const m = line.match(/users:\(\("([^"]+)",pid=(\d+)/);
     const pid = m ? Number(m[2]) : null;
     const name = m ? m[1] : null;
-    const entry = { host: addr.host, port: addr.port, pid, name, cmdline: '', cwd: '', exe: '' };
+    const entry = { host: addr.host, port: addr.port, pid, name, cmdline: '', argv: [], cwd: '', exe: '' };
     if (pid) {
-      entry.cmdline = readProc(pid, 'cmdline').split('\0').filter(Boolean).join(' ');
+      entry.argv = readProc(pid, 'cmdline').split('\0').filter(Boolean);
+      entry.cmdline = entry.argv.join(' ');
       entry.cwd = readLink(pid, 'cwd');
       entry.exe = readLink(pid, 'exe');
     }
@@ -63,15 +64,14 @@ async function listLinux() {
 
 const winNameCache = new Map();
 async function listWindows() {
-  const out = await run('netstat', ['-ano', '-p', 'TCP']);
-  const out6 = await run('netstat', ['-ano', '-p', 'TCPv6']);
+  const [out, out6] = await Promise.all([run('netstat', ['-ano', '-p', 'TCP']), run('netstat', ['-ano', '-p', 'TCPv6'])]);
   const rows = [];
   for (const line of (out + '\n' + out6).split('\n')) {
     const cols = line.trim().split(/\s+/);
     if (cols.length < 5 || cols[0] !== 'TCP' || cols[3] !== 'LISTENING') continue;
     const addr = splitAddr(cols[1]);
     if (!addr) continue;
-    rows.push({ host: addr.host, port: addr.port, pid: Number(cols[4]), name: null, cmdline: '', cwd: '', exe: '' });
+    rows.push({ host: addr.host, port: addr.port, pid: Number(cols[4]), name: null, cmdline: '', argv: [], cwd: '', exe: '' });
   }
   const unknown = [...new Set(rows.map(r => r.pid))].filter(p => !winNameCache.has(p));
   if (unknown.length) {

@@ -4,8 +4,10 @@ const $ = (s) => document.querySelector(s);
 let servers = [];
 let loaded = false;           // first scan arrived; until then "no apps" would be a lie
 let netApps = [];
+let pins = [];
 let logins = { entries: [], backend: '' };
-let tabState = { active: 'home', tabs: [], open: [] };
+let perms = [];
+let tabState = { active: 'home', tabs: [], open: [], counts: {} };
 let query = '';
 let notice = '';              // error from adding an address
 let rename = null;            // { id, value, fresh } while a tile's name is edited
@@ -20,9 +22,11 @@ const CLOSE_ICON = '<svg width="10" height="10" viewBox="0 0 10 10" stroke="curr
 
 let view = { layout: 'grid' };   // home layout: 'grid' (small tiles) or 'previews' (prefs.js)
 
+// Pinned apps ("my apps") first, in pin order and also while their server is
+// down; then the rest of what runs on this computer and on the network.
 function apps() {
-  const local = servers.filter(s => s.kind === 'html' && !s.hidden).map(s => ({
-    id: s.id, key: s.key, icon: s.icon, thumb: s.thumb,
+  const local = servers.filter(s => s.kind === 'html').map(s => ({
+    id: s.id, key: s.key, icon: s.icon, thumb: s.thumb, hidden: s.hidden,
     name: s.label || s.title || baseName(s.cwd) || s.name || `:${s.port}`,
     sub: `:${s.port}`,
     tip: [s.url, s.cwd, s.name && `${s.name} · pid ${s.pid}`].filter(Boolean).join('\n'),
@@ -33,40 +37,64 @@ function apps() {
     sub: a.host,
     tip: a.url,
   }));
-  return { local, network };
+  const pinnedKeys = new Set(pins.map(p => p.key));
+  const live = new Map([...local, ...network].map(a => [a.key, a]));
+  const pinned = pins.map(p => live.get(p.key) || {
+    id: `pin:${p.key}`, key: p.key, icon: p.icon, thumb: p.thumb, stopped: true, starting: p.starting,
+    name: p.label || p.title || p.key,
+    sub: p.starting ? 'Starting…' : p.local ? 'Not running' : 'offline',
+    tip: [p.url, p.local && (p.canStart ? 'Click to start it' : 'Opens once its server runs')].filter(Boolean).join('\n'),
+  });
+  return {
+    pinned,
+    local: local.filter(a => !a.hidden && !pinnedKeys.has(a.key)),
+    network: network.filter(a => !pinnedKeys.has(a.key)),
+  };
 }
 
 function renderHome() {
-  const layout = view.layout;
   const q = query.trim().toLowerCase();
   const hit = (a) => !q || `${a.name} ${a.sub} ${a.tip}`.toLowerCase().includes(q);
-  const { local, network } = apps();
+  const { pinned, local, network } = apps();
+  const p = pinned.filter(hit);
   const l = local.filter(hit);
   const n = network.filter(hit);
-  const first = l[0] || n[0];
+  const first = p[0] || l[0] || n[0];
   const open = new Set(tabState.open);
+  const counts = tabState.counts || {};
+  const hasPins = pinned.length > 0;
 
   const name = (a) => rename && rename.id === a.id
     ? `<input class="rename" value="${esc(rename.value)}" spellcheck="false">`
     : `<span class="name">${esc(a.name)}</span>`;
-  const tile = (a) => {
-    const cls = `tile${a.offline ? ' offline' : ''}${open.has(a.key) ? ' open' : ''}${q && a === first ? ' selected' : ''}${hit(a) ? '' : ' dim'}`;
+  const status = (a) => (a.offline || a.stopped ? `<span class="sub">${esc(a.stopped ? a.sub : 'offline')}</span>` : '');
+  const badge = (a) => (counts[a.key] ? `<span class="badge">${counts[a.key] > 99 ? '99+' : counts[a.key]}</span>` : '');
+  const tile = (a, layout) => {
+    const cls = `tile${a.offline || a.stopped ? ' offline' : ''}${a.starting ? ' starting' : ''}${open.has(a.key) ? ' open' : ''}${q && a === first ? ' selected' : ''}`;
     const body = layout === 'previews'
-      ? `<span class="shot">${a.thumb ? `<img src="${esc(a.thumb)}" alt="" draggable="false">` : iconHtml(a.icon, a.name, a.key, 'icon')}</span>
-         <span class="cap">${iconHtml(a.icon, a.name, a.key, 'ticon')}${name(a)}${a.offline ? '<span class="sub">offline</span>' : ''}</span>`
-      : `${iconHtml(a.icon, a.name, a.key, 'icon')}${name(a)}${a.offline ? '<span class="sub">offline</span>' : ''}`;
+      ? `<span class="shot">${a.thumb ? `<img src="${esc(a.thumb)}" alt="" draggable="false">` : iconHtml(a.icon, a.name, a.key, 'icon')}${badge(a)}</span>
+         <span class="cap">${iconHtml(a.icon, a.name, a.key, 'ticon')}${name(a)}${status(a)}</span>`
+      : `<span class="icon-wrap">${iconHtml(a.icon, a.name, a.key, 'icon')}${badge(a)}</span>${name(a)}${status(a)}`;
     const tip = `${a.tip}\nCtrl+click: open in ${view.windowsByDefault ? 'a tab' : 'its own window'}`;
     return `<div class="${cls}" data-id="${esc(a.id)}" title="${esc(tip)}" tabindex="0" role="button">${body}</div>`;
   };
+  // With pinned apps, the rest is a compact list below them.
+  const restLayout = hasPins ? 'compact' : view.layout;
 
-  $('#home').dataset.layout = layout;
+  $('#home').dataset.layout = view.layout;
+  $('.apps').classList.toggle('has-pins', hasPins);
   rendering = true;
-  $('#local').innerHTML = l.map(a => tile(a)).join('');
-  $('#net').innerHTML = n.map(a => tile(a)).join('');
+  $('#pinned').innerHTML = p.map(a => tile(a, view.layout)).join('');
+  $('#local').innerHTML = l.map(a => tile(a, restLayout)).join('');
+  $('#net').innerHTML = n.map(a => tile(a, restLayout)).join('');
   rendering = false;
+  $('#pinned').className = `grid ${view.layout}`;
+  $('#local').className = $('#net').className = `grid ${restLayout}`;
+  $('#pin-sec').hidden = !p.length;
   $('#local-sec').hidden = !l.length;
   $('#net-sec').hidden = !n.length;
-  for (const h of document.querySelectorAll('.section-label')) h.hidden = !(l.length && n.length);
+  for (const h of document.querySelectorAll('#rest .section-label')) h.hidden = !hasPins && !(l.length && n.length);
+  $('#pin-hint').hidden = hasPins || !!q || !(l.length + n.length);
 
   const hint = $('#hint');
   hint.hidden = !notice && !(q && !first);
@@ -74,15 +102,16 @@ function renderHome() {
   if (notice) hint.textContent = notice;
   else if (looksLikeAddress(query.trim())) hint.innerHTML = `Press <kbd>Enter</kbd> to add <b>${esc(query.trim())}</b>`;
   else hint.textContent = 'No matching apps';
-  $('#empty').hidden = !loaded || !!q || local.length + network.length > 0;
+  $('#empty').hidden = !loaded || !!q || pinned.length + local.length + network.length > 0;
 
   const input = document.querySelector('.rename');
   if (input) {
     input.focus();
     if (rename.fresh) { input.select(); rename.fresh = false; }
   }
-  if (layout === 'previews' && tabState.active === 'home') {
-    const missing = [...l, ...n].filter(a => !a.thumb && !a.offline).map(a => a.id);
+  if (view.layout === 'previews' && tabState.active === 'home') {
+    const shown = hasPins ? p : [...l, ...n];
+    const missing = shown.filter(a => !a.thumb && !a.offline && !a.stopped).map(a => a.id);
     if (missing.length) api.wantThumbs(missing);
   }
   renderFooter();
@@ -96,6 +125,7 @@ function renderFooter() {
   if (services) parts.push(`<button data-manage="services">${plural(services, 'background service')}</button>`);
   if (hiddenCount) parts.push(`<button data-manage="hidden">${hiddenCount} hidden</button>`);
   if (logins.entries.length) parts.push(`<button data-manage="logins">${plural(logins.entries.length, 'saved login')}</button>`);
+  if (perms.length) parts.push(`<button data-manage="permissions">${plural(perms.length, 'permission')}</button>`);
   parts.push('<button data-discover>Find network apps</button>');
   $('#links').innerHTML = parts.join('<span>·</span>');
   for (const b of document.querySelectorAll('#views button')) b.classList.toggle('on', b.dataset.layout === view.layout);
@@ -178,10 +208,19 @@ function renderManage() {
       <button class="act" data-act="forget">Forget</button>
     </div>`).join('');
   $('#m-backend').textContent = `Passwords are stored ${logins.backend}.`;
+  const PERM_NAMES = { camera: 'Camera', microphone: 'Microphone', geolocation: 'Location', 'display-capture': 'Screen recording',
+                       'clipboard-read': 'Clipboard', midi: 'MIDI', midiSysex: 'MIDI', 'idle-detection': 'Idle detection', openExternal: 'Other programs' };
+  $('#m-perms').innerHTML = perms.map(x => `
+    <div class="row" data-origin="${esc(x.origin)}" data-perm="${esc(x.permission)}">
+      <span class="r-main">${esc(PERM_NAMES[x.permission] || x.permission)} · ${x.allowed ? 'allowed' : 'blocked'}</span>
+      <span class="r-sub">${esc(x.origin.replace(/^https?:\/\//, ''))}</span>
+      <button class="act" data-act="unperm">Forget</button>
+    </div>`).join('');
   $('[data-sec="services"]').hidden = !services.length;
   $('[data-sec="hidden"]').hidden = !hiddenList.length;
   $('[data-sec="logins"]').hidden = !logins.entries.length;
-  if (!services.length && !hiddenList.length && !logins.entries.length) $('#manage').close();
+  $('[data-sec="permissions"]').hidden = !perms.length;
+  if (!services.length && !hiddenList.length && !logins.entries.length && !perms.length) $('#manage').close();
 }
 
 function openManage(section) {
@@ -200,18 +239,23 @@ $('#manage').addEventListener('click', (e) => {
   if (act === 'open') { d.close(); api.openTab(row.dataset.id); }
   if (act === 'show') api.unhideServer(row.dataset.id);
   if (act === 'forget') api.removePassword(row.dataset.login);
+  if (act === 'unperm') api.forgetPermission(row.dataset.origin, row.dataset.perm);
 });
 
 // ---------- tabs ----------
 
+let shownTab = 'home';
 function renderTabs() {
   const { active, tabs } = tabState;
+  if (active !== shownTab) { shownTab = active; finder.close(); }   // find belongs to the page it was opened on
   $('#tabs').innerHTML = tabs.map(t => `
     <div class="tab${t.id === active ? ' active' : ''}" data-tab="${esc(t.id)}" title="${esc(t.title)}">
       ${t.loading ? '<span class="spin"></span>' : iconHtml(t.icon, t.title, t.key, 'ticon')}
       <span class="label">${esc(t.title || t.url)}</span>
+      ${t.count ? `<span class="count">${t.count > 99 ? '99+' : t.count}</span>` : ''}
       <button class="close" data-close="${esc(t.id)}" title="Close (Ctrl+W)">${CLOSE_ICON}</button>
     </div>`).join('');
+  setBadge(tabs.reduce((sum, t) => sum + (t.count || 0), 0));
   $('.tab.home').classList.toggle('active', active === 'home');
   $('.tab.home').hidden = !tabs.length;   // nothing open: the bar is a title bar with the name
   $('#brand').hidden = tabs.length > 0;
@@ -310,11 +354,16 @@ api.onServers((list) => { servers = list; loaded = true; renderHome(); });
 api.listServers().then((list) => { if (list.length) { servers = list; loaded = true; renderHome(); } });
 api.onNet((list) => { netApps = list; renderHome(); if ($('#discover').open) renderDiscover(); });
 api.listNet().then((list) => { netApps = list; renderHome(); });
+api.onPins((list) => { pins = list; renderHome(); });
+api.listPins().then((list) => { pins = list; renderHome(); });
+api.onPermissions((list) => { perms = list; renderHome(); });
+api.listPermissions().then((list) => { perms = list; renderHome(); });
 api.onPasswords((st) => { logins = st; renderHome(); });
 api.listPasswords().then((st) => { logins = st; renderHome(); });
 api.onTabs((state) => { tabState = state; renderTabs(); renderHome(); });
 api.onRename((id) => {
-  const a = [...apps().local, ...apps().network].find(x => x.id === id);
+  const { pinned, local, network } = apps();
+  const a = [...pinned, ...local, ...network].find(x => x.id === id);
   rename = { id, value: a ? a.name : '', fresh: true };
   renderHome();
 });

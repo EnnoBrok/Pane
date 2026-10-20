@@ -1,6 +1,6 @@
 {
   "name": "pane",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local and network web apps as desktop apps: finds running servers and opens each in a tab or its own window",
   "main": "src/main/main.js",
   "scripts": {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Menu, clipboard, screen, nativeTheme, nativeImage } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Menu, clipboard, screen, nativeTheme, nativeImage, Notification } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
@@ -15,12 +15,14 @@ const standalone = require('./standalone');
 const thumbs = require('./thumbs');
 const { discover } = require('./discover');
 const { selfInstall } = require('./install');
+const launch = require('./launch');
 
 const TAB_BAR_HEIGHT = 40;
 const FRAME_HEIGHT = 34;          // title strip of an app opened in its own window
 const SCAN_INTERVAL_MS = 2000;
 const REPROBE_MS = 30000;         // confirmed web apps
 const REPROBE_PENDING_MS = 5000;  // everything else, which may still be starting up
+const START_TIMEOUT_MS = 90000;   // a started server that never answers is given up on
 const NET_REPROBE_MS = 15000;     // user-added network apps
 const HOME_BG = { dark: '#16171b', light: '#f5f5f6' };   // --page in style.css
 
@@ -37,7 +39,8 @@ const tabs = new Map();
 let activeTab = 'home';
 let nextTabId = 1;
 let nextLinkId = 1;
-let scanning = false;
+let scanning = null;         // the scan in flight
+const starting = new Map();  // app key -> time its server was started from Pane, until it answers
 
 function send(channel, data) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, data);
@@ -49,11 +52,18 @@ function serverId(l) { return `${l.pid || 0}:${l.port}`; }
 // Stable across restarts (pids change); the same key hidden.js uses.
 function serverKey(s) { return `${s.name || ''}:${s.port}`; }
 
-async function scan() {
-  if (scanning) return;   // a slow probe must not stack up scans
-  scanning = true;
-  try { await scanOnce(); } finally { scanning = false; }
+// Full scan while the main window exists. With only app windows open nobody sees
+// the launcher, so then the failed tabs are just retried, without listing ports.
+function scan() {
+  if (!scanning) {   // a slow probe must not stack up scans
+    const full = win && !win.isDestroyed();
+    scanning = (full ? scanOnce() : Promise.resolve().then(retryFailed))
+      .catch(() => {})
+      .finally(() => { scanning = null; });
+  }
+  return scanning;
 }
+function retryFailed() { for (const t of tabs.values()) if (t.failed) recover(t.key); }
 
 async function scanOnce() {
   const listeners = await listListeners();
@@ -66,7 +76,7 @@ async function scanOnce() {
     seen.add(id);
     let s = servers.get(id);
     if (!s) {
-      s = { id, port: l.port, pid: l.pid, name: l.name, cmdline: l.cmdline, cwd: l.cwd, exe: l.exe,
+      s = { id, port: l.port, pid: l.pid, name: l.name, cmdline: l.cmdline, argv: l.argv, cwd: l.cwd, exe: l.exe,
             host: l.reachHost, kind: null, title: '', url: '', proto: '', icon: '', probedAt: 0 };
       servers.set(id, s);
       changed = true;
@@ -81,11 +91,13 @@ async function scanOnce() {
       if (kind === 'html') {
         if (!s.iconTried) {
           s.iconTried = true;
-          icons.forPage(p.url, p.body).then((icon) => { if (icon && servers.get(id) === s) { s.icon = icon; pushServers(); } });
+          icons.forPage(p.url, p.body).then((icon) => { if (icon && servers.get(id) === s) { s.icon = icon; refreshPin(s); pushServers(); } });
         }
-        recover(serverKey(s));
+        refreshPin(s);
+        if (starting.delete(serverKey(s))) { pushPins(); notifyKey(serverKey(s)); recover(serverKey(s), true); }
       }
     }
+    if (s.kind === 'html') recover(serverKey(s));   // its tabs that failed while it was down
   }));
   for (const id of servers.keys()) {
     if (!seen.has(id)) { servers.delete(id); changed = true; }
@@ -106,6 +118,7 @@ function publicServers() {
 function pushServers() { send('servers:update', publicServers()); }
 
 async function scanNet(force = false) {
+  if (!win || win.isDestroyed()) return;   // nobody sees the list; failed tabs are retried by scan()
   if (await netapps.refresh(force ? 0 : NET_REPROBE_MS)) pushNet();
   for (const a of netapps.list()) if (a.online) recover(a.url);
 }
@@ -113,8 +126,102 @@ function publicNet() { return netapps.list().map(a => ({ ...a, key: a.url, label
 function thumbFor(key) { return prefs.getLayout() === 'previews' ? thumbs.get(key) : ''; }
 function pushNet() { send('net:update', publicNet()); }
 
-// Resolves a server id (local "pid:port" or "net:n") to what a tab needs.
+// ---------- pinned apps ----------
+// Pinned apps sit at the top of home and stay there while their server is down
+// (tile id "pin:<key>"). A local one remembers how its server was started.
+
+function publicPins() {
+  return prefs.listPins().map(p => ({
+    key: p.key, local: p.local, title: p.title, label: prefs.getName(p.key), icon: p.icon, url: p.url,
+    thumb: thumbFor(p.key), canStart: p.local && launch.canStart(p.start), starting: starting.has(p.key),
+  }));
+}
+function pushPins() { send('pins:update', publicPins()); }
+
+function pin(target) {
+  const s = target.id && servers.get(target.id);
+  prefs.setPinned(target.key, { ...target, start: s ? launch.commandOf(s) : null });
+  pushPins();
+}
+function unpin(key) { prefs.setPinned(key, null); pushPins(); }
+
+// Keeps a pin's title, icon and start command current while its app runs.
+function refreshPin(s) {
+  const key = serverKey(s);
+  if (prefs.isPinned(key)) prefs.updatePin(key, { title: s.title, url: s.url, icon: s.icon, start: launch.commandOf(s) });
+}
+
+// Resolves when something answers on the URL's port.
+function listening(url) {
+  let host, port;
+  try { const u = new URL(url); host = u.hostname.replace(/^\[|\]$/g, ''); port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80); }
+  catch { return Promise.resolve(false); }
+  return new Promise((resolve) => {
+    const sock = net.connect({ host, port });
+    const done = (ok) => { sock.destroy(); resolve(ok); };
+    sock.setTimeout(500, () => done(false));
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
+}
+
+// Starts an app's server with { start, url, title }: a pin, or what a running
+// server was seen with. Returns false when there is nothing to start.
+async function startServer(key, info) {
+  if (starting.has(key) || !launch.canStart(info.start)) return false;
+  if (await listening(info.url)) return false;   // already up
+  const name = prefs.getName(key) || info.title || key;
+  const fail = (detail) => {
+    if (!starting.delete(key)) return;
+    pushPins(); notifyKey(key);
+    startFailed(key, name, detail);
+  };
+  let child;
+  starting.set(key, Date.now());
+  try { child = launch.start(key, info.start); } catch (err) { fail(String(err.message || err)); return false; }
+  child.once('error', (err) => fail(String(err.message || err)));
+  // Exit code 0 can be a server that forked itself into the background.
+  child.once('exit', (code, signal) => { if (code !== 0) fail(signal ? `It was ended by ${signal}.` : `It exited with code ${code}.`); });
+  setTimeout(() => { if (starting.delete(key)) { pushPins(); notifyKey(key); } }, START_TIMEOUT_MS);
+  pushPins();
+  notifyKey(key);
+  return true;
+}
+function startPinned(key) {
+  const p = prefs.getPin(key);
+  return p && p.local ? startServer(key, p) : Promise.resolve(false);
+}
+
+async function startFailed(key, name, detail) {
+  const log = launch.hasLog(key);
+  const { response } = await dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
+    type: 'error', message: `${name} did not start`, detail, noLink: true,
+    buttons: log ? ['Show output', 'Close'] : ['Close'], defaultId: 0, cancelId: log ? 1 : 0,
+  });
+  if (log && response === 0) shell.openPath(launch.logFile(key));
+}
+
+// Stops a local server and starts it again with the same command.
+function restartServer(s) {
+  const key = serverKey(s);
+  const info = { start: launch.commandOf(s), url: s.url, title: s.title || s.name };
+  treeKill(s.pid, 'SIGTERM', async (err) => {
+    if (err) { dialog.showMessageBox(win, { type: 'error', message: `Could not stop ${info.title}`, detail: String(err.message || err) }); return; }
+    for (let i = 0; i < 40 && await listening(info.url); i++) await new Promise(r => setTimeout(r, 250));
+    startServer(key, info);
+  });
+}
+
+// Resolves a server id (local "pid:port", "net:n" or "pin:<key>") to what a tab needs.
 function resolveTarget(sid) {
+  if (String(sid).startsWith('pin:')) {
+    const key = sid.slice(4);
+    const live = [...servers.values()].find(x => x.kind === 'html' && serverKey(x) === key)
+      || netapps.list().find(a => a.url === key);
+    if (live) return resolveTarget(live.id);
+    const p = prefs.getPin(key);
+    return p && { id: null, key, url: p.url, icon: p.icon, label: prefs.getName(key), title: p.title || key, partition: p.partition };
+  }
   const s = servers.get(sid);
   if (s) {
     const key = serverKey(s);
@@ -175,23 +282,95 @@ function layoutWindow(t) {
 }
 function relayout(t) { if (t.host) layoutWindow(t); else layout(); }
 
+// "(3) Inbox": the count becomes a badge, the title is shown without it.
+function unread(title) {
+  const m = /^\s*[([](\d{1,5})\+?[)\]]\s*/.exec(title || '');
+  return m ? { count: Number(m[1]), title: title.slice(m[0].length) } : { count: 0, title };
+}
+function windowTitle(t) {
+  const name = t.label || t.title || 'Pane';
+  return t.count ? `(${t.count}) ${name}` : name;
+}
+
 function publicTab(t) {
-  return { id: t.id, key: t.key, title: t.label || t.title, url: t.url, icon: t.icon, theme: t.theme,
-           loading: t.loading, failed: t.failed ? t.failed.desc : null };
+  const p = prefs.getPin(t.key);
+  return { id: t.id, key: t.key, title: t.label || t.title, url: t.url, icon: t.icon, theme: t.theme, count: t.count || 0,
+           loading: t.loading, failed: t.failed ? t.failed.desc : null,
+           starting: starting.has(t.key), canStart: !!(p && p.local && launch.canStart(p.start)) };
 }
 function pushTabs() {
-  send('tabs:update', { active: activeTab, tabs: mainTabs().map(publicTab), open: [...tabs.values()].map(t => t.key) });
+  const counts = {};
+  for (const t of tabs.values()) if (t.count) counts[t.key] = (counts[t.key] || 0) + t.count;
+  send('tabs:update', { active: activeTab, tabs: mainTabs().map(publicTab), open: [...tabs.values()].map(t => t.key), counts });
   if (win && !win.isDestroyed()) {
     const t = tabs.get(activeTab);
-    win.setTitle(t ? (t.label || t.title) : 'Pane');   // the taskbar shows the app, not the browser
+    win.setTitle(t ? windowTitle(t) : 'Pane');   // the taskbar shows the app, not the browser
   }
+  updateBadgeCount();
+  saveSession();
 }
 function pushFrame(t) {
   if (!t.host || t.host.isDestroyed()) return;
   t.host.webContents.send('frame:update', publicTab(t));
-  t.host.setTitle(t.label || t.title || 'Pane');
+  t.host.setTitle(windowTitle(t));
 }
-function notify(t) { if (t.host) pushFrame(t); else pushTabs(); }
+// App windows are not in the tab list, but home shows their unread counts too.
+function notify(t) { if (t.host) { pushFrame(t); pushTabs(); } else pushTabs(); }
+function notifyKey(key) { for (const t of tabs.values()) if (t.key === key) notify(t); }
+
+// Linux launchers that support it (KDE, Unity) show the total unread count on Pane's icon.
+let badgeCount = 0;
+function updateBadgeCount() {
+  if (process.platform !== 'linux') return;
+  const n = [...tabs.values()].reduce((sum, t) => sum + (t.count || 0), 0);
+  if (n !== badgeCount) { badgeCount = n; app.setBadgeCount(n); }
+}
+
+// ---------- reopening apps ----------
+// The apps open when Pane closes are reopened on the next start. Closing a
+// single window takes its app off the list; closing the last one keeps it.
+let mainOpened = false;     // started from a standalone launcher only: leave the list alone
+let restored = false;       // saving waits until the saved list was read back
+let sessionTimer = null;
+let sessionFrozen = false;
+
+function sessionSnapshot() {
+  return [...tabs.values()].filter(t => !t.key.startsWith('link:')).map(t => ({
+    key: t.key, url: t.url, title: t.title, icon: t.icon, partition: t.partition,
+    window: !!t.host, active: !t.host && t.id === activeTab,
+  }));
+}
+function saveSession() {
+  if (sessionFrozen || !mainOpened || !restored) return;
+  clearTimeout(sessionTimer);
+  sessionTimer = setTimeout(() => { sessionTimer = null; prefs.setSession(sessionSnapshot()); }, 1000);
+}
+function freezeSession() {
+  if (sessionFrozen) return;
+  clearTimeout(sessionTimer);
+  if (mainOpened && restored) prefs.setSession(sessionSnapshot());
+  sessionFrozen = true;
+}
+// Called from a window's 'close': the last one going means Pane is quitting.
+function windowClosing() {
+  const open = (win && !win.isDestroyed() ? 1 : 0) + [...tabs.values()].filter(t => t.host && !t.host.isDestroyed()).length;
+  if (open <= 1) freezeSession();
+}
+
+// Local apps come back only if their server runs (or they are pinned); a dev server that is gone stays closed.
+function restoreSession() {
+  restored = true;
+  const live = new Set([...servers.values()].filter(x => x.kind === 'html').map(serverKey));
+  let active = null;
+  for (const e of prefs.getSession()) {
+    if (!/^https?:\/\//.test(e.key) && !live.has(e.key) && !prefs.isPinned(e.key)) continue;
+    if ([...tabs.values()].some(t => t.key === e.key)) continue;
+    const id = openTab({ id: null, key: e.key, url: e.url, title: e.title, label: prefs.getName(e.key), icon: e.icon, partition: e.partition },
+      { window: !!e.window });
+    if (e.active) active = id;
+  }
+  if (win && !win.isDestroyed()) activateTab(active || 'home');
+}
 
 // Samples the top strip of the page and reports its average color, so the
 // bar above it can blend in.
@@ -255,7 +434,7 @@ function openTab(target, opts = {}) {
   view.setBackgroundColor(nativeTheme.shouldUseDarkColors ? HOME_BG.dark : HOME_BG.light);
   const id = String(nextTabId++);
   const t = { id, serverId: target.id, key: target.key, label: target.label || '', partition: target.partition, view,
-              title: target.title, url: target.url, icon: target.icon || '', theme: null, loading: true, failed: null, host: null };
+              title: target.title, url: target.url, icon: target.icon || '', theme: null, loading: true, failed: null, host: null, count: 0 };
   tabs.set(id, t);
   wire(t);
   view.webContents.loadURL(target.url);
@@ -288,7 +467,13 @@ function reveal(t) {
 
 function wire(t) {
   const wc = t.view.webContents;
-  wc.on('page-title-updated', (_e, title) => { if (!t.failed) { t.title = title; notify(t); } });
+  wc.on('page-title-updated', (_e, title) => {
+    if (t.failed) return;
+    const u = unread(title);
+    t.title = u.title;
+    t.count = u.count;
+    notify(t);
+  });
   wc.on('page-favicon-updated', async (_e, favicons) => {
     const icon = await icons.fetchIcon(favicons[0]);
     if (icon && icon !== t.icon) { t.icon = icon; notify(t); }
@@ -303,7 +488,14 @@ function wire(t) {
   wc.on('did-navigate', (_e, url) => {
     t.url = url;
     if (t.failed) { t.failed = null; relayout(t); }
+    const z = prefs.getZoom(t.key);   // zoom is remembered per app
+    if (z !== wc.getZoomLevel()) wc.setZoomLevel(z);
     notify(t);
+  });
+  wc.on('did-finish-load', () => { if (!t.failed && starting.delete(t.key)) { pushPins(); notifyKey(t.key); } });
+  wc.on('found-in-page', (_e, r) => {
+    const w = windowOf(t);
+    if (w && !w.isDestroyed()) w.webContents.send('find:result', { active: r.activeMatchOrdinal, matches: r.matches });
   });
   wc.on('did-navigate-in-page', (_e, url) => { t.url = url; notify(t); });
   wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
@@ -327,11 +519,11 @@ function wire(t) {
   });
 }
 
-// A failed tab reloads by itself once its server answers again.
-function recover(key) {
+// A failed tab reloads by itself once its server answers again (now, with force).
+function recover(key, force = false) {
   for (const t of tabs.values()) {
     if (!t.failed || t.key !== key || t.view.webContents.isDestroyed()) continue;
-    if (Date.now() - t.failed.at < 3000) continue;
+    if (!force && Date.now() - t.failed.at < 3000) continue;
     t.failed.at = Date.now();
     t.view.webContents.loadURL(t.failed.url);
   }
@@ -348,6 +540,7 @@ function destroyTab(t) {
   const list = mainTabs();
   const i = list.indexOf(t);
   if (!t.host && win && !win.isDestroyed()) win.contentView.removeChildView(t.view);
+  for (const [id, n] of notes) if (n.tab === t) { n.note.close(); notes.delete(id); }
   if (!t.view.webContents.isDestroyed()) t.view.webContents.close();
   tabs.delete(t.id);
   if (activeTab === t.id) {
@@ -382,7 +575,7 @@ function moveToTabs(t) {
   win.focus();
 }
 
-// Restores saved bounds only if they still land on a connected display.
+// Restores saved bounds only if they still land on a connected display; .maximized rides along.
 function savedBounds(key, fallback) {
   const b = prefs.getBounds(key);
   const visible = b && screen.getAllDisplays().some(({ workArea: a }) =>
@@ -393,22 +586,28 @@ function savedBounds(key, fallback) {
 // An app on its own: a slim, app-colored title strip above the page, its own taskbar entry.
 function attachWindow(t) {
   const dark = t.theme ? t.theme.dark : nativeTheme.shouldUseDarkColors;
+  const bounds = savedBounds(`window:${t.key}`, { width: 1100, height: 760 });
   const w = new BrowserWindow({
-    ...savedBounds(`window:${t.key}`, { width: 1100, height: 760 }), minWidth: 420, minHeight: 300,
+    ...bounds, minWidth: 420, minHeight: 300,
     title: t.label || t.title, backgroundColor: dark ? HOME_BG.dark : HOME_BG.light, icon: ICON,
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: dark ? HOME_BG.dark : HOME_BG.light, symbolColor: dark ? '#e9eaee' : '#1c1d21', height: FRAME_HEIGHT },
     webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   t.host = w;
+  if (bounds.maximized) w.maximize();
   applyStandaloneIdentity(t);
   guardChrome(w.webContents);
   w.contentView.addChildView(t.view);
   w.loadFile(path.join(RENDERER, 'frame.html'), { query: { tab: t.id } });
   layoutWindow(t);
   onResize(w, () => layoutWindow(t));
-  w.on('close', () => prefs.setBounds(`window:${t.key}`, w.getNormalBounds()));
+  w.on('close', () => {
+    prefs.setBounds(`window:${t.key}`, { ...w.getNormalBounds(), maximized: w.isMaximized() });
+    if (t.host === w) windowClosing();   // not when the app only moves back into a tab
+  });
   w.on('closed', () => { if (t.host === w) { t.host = null; destroyTab(t); } });
+  w.on('focus', () => w.flashFrame(false));
   w.on('app-command', (_e, cmd) => appCommand(t.view.webContents, cmd));
   w.webContents.on('before-input-event', (e, input) => { if (handleKey(input, t)) e.preventDefault(); });
   w.webContents.on('did-finish-load', () => pushFrame(t));
@@ -451,6 +650,7 @@ async function detach(target, chrome) {
   prefs.setStandalone(id, { key: target.key, name, url: target.url, partition: target.partition, icon: target.icon || '',
                             png: 'data:image/png;base64,' + png.toString('base64'), file: where });
   prefs.setWindowed(target.key, true);
+  if (!prefs.isPinned(target.key)) pin(target);   // a detached app is one of "my apps"
   openTab(target, { window: true });
   const t = [...tabs.values()].find(x => x.key === target.key);
   if (t) applyStandaloneIdentity(t);
@@ -493,6 +693,7 @@ function openStandalone(id) {
   const e = id && prefs.getStandalone(id);
   if (!e) return false;
   openTab({ id: null, key: e.key, url: e.url, title: e.name, label: prefs.getName(e.key), icon: e.icon, partition: e.partition }, { window: true });
+  startPinned(e.key);   // its server, if it is pinned, local and down
   return true;
 }
 
@@ -516,8 +717,11 @@ function showHome(focusSearch) {
   win.focus();
   if (focusSearch) send('home:focus');
 }
-function zoom(wc, step) {
-  wc.setZoomLevel(step ? Math.max(-3, Math.min(5, wc.getZoomLevel() + step)) : 0);
+function zoom(t, step) {
+  const wc = t.view.webContents;
+  const level = step ? Math.max(-3, Math.min(5, wc.getZoomLevel() + step)) : 0;
+  wc.setZoomLevel(level);
+  prefs.setZoom(t.key, level);
 }
 function appCommand(wc, cmd) {
   if (!wc || wc.isDestroyed()) return;
@@ -550,9 +754,10 @@ function handleKey(input, t) {
   const h = wc.navigationHistory;
   if (input.alt && key === 'ArrowLeft') { if (h.canGoBack()) h.goBack(); return true; }
   if (input.alt && key === 'ArrowRight') { if (h.canGoForward()) h.goForward(); return true; }
-  if (ctrl && (key === '+' || key === '=')) { zoom(wc, 0.5); return true; }
-  if (ctrl && key === '-') { zoom(wc, -0.5); return true; }
-  if (ctrl && key === '0') { zoom(wc, 0); return true; }
+  if (ctrl && (key === '+' || key === '=')) { zoom(t, 0.5); return true; }
+  if (ctrl && key === '-') { zoom(t, -0.5); return true; }
+  if (ctrl && key === '0') { zoom(t, 0); return true; }
+  if (ctrl && key === 'f') { openFind(t); return true; }
   if ((ctrl && key === 'F5') || (ctrl && input.shift && key === 'r')) { hardReload(wc); return true; }
   if (key === 'F5' || (ctrl && key === 'r')) { wc.reload(); return true; }
   if (key === 'F12') { wc.toggleDevTools(); return true; }
@@ -601,6 +806,7 @@ function setLayout(layout) {
   pushView();
   pushServers();   // thumbnails come and go with the Previews layout
   pushNet();
+  pushPins();
 }
 function publicView() { return { layout: prefs.getLayout(), windowsByDefault: prefs.windowsByDefault() }; }
 function pushView() { send('view:update', publicView()); }
@@ -624,6 +830,8 @@ function tabMenu(t) {
     { label: 'Hard reload', accelerator: 'Ctrl+Shift+R', click: () => hardReload(wc) },
     SEP,
     t.host ? { label: 'Move to tabs', click: () => moveToTabs(t) } : { label: 'Open in own window', click: () => moveToWindow(t) },
+    pinItem({ id: t.serverId, key: t.key, url: t.url, title: t.title, icon: t.icon, partition: t.partition }),
+    { label: 'Find in page…', accelerator: 'Ctrl+F', click: () => openFind(t) },
     detachItem({ key: t.key, url: t.url, title: t.title, label: t.label, icon: t.icon, partition: t.partition }, windowOf(t)?.webContents),
     { label: 'Copy address', click: () => clipboard.writeText(t.url) },
     { label: 'Open in system browser', click: () => openExternal(t.url) },
@@ -663,11 +871,20 @@ function pageMenu(t, p) {
   popup(items, windowOf(t));
 }
 
-// Right-click on a launcher tile (or a row in Manage).
+function pinItem(target) {
+  if (target.key.startsWith('link:')) return { label: 'Pin to top', enabled: false };
+  return prefs.isPinned(target.key)
+    ? { label: 'Unpin from top', click: () => unpin(target.key) }
+    : { label: 'Pin to top', click: () => pin(target) };
+}
+
+// Right-click on a launcher tile (or a row in Manage). sid "pin:<key>" is a pinned app whose server is down.
 function tileMenu(sender, sid) {
   const target = resolveTarget(sid);
   if (!target) return;
-  const s = servers.get(sid);
+  const s = servers.get(target.id);
+  const n = netapps.get(target.id);
+  const p = prefs.getPin(target.key);
   const open = [...tabs.values()].find(t => t.key === target.key);
   const items = [
     opensInWindow(target.key)
@@ -675,21 +892,31 @@ function tileMenu(sender, sid) {
       : { label: open && open.host ? 'Show window' : 'Open in own window', accelerator: 'Ctrl+Enter', click: () => openTab(target, { window: true }) },
     { label: 'Always open in own window', type: 'checkbox', checked: prefs.isWindowed(target.key),
       click: (mi) => prefs.setWindowed(target.key, mi.checked) },
+    pinItem(target),
     detachItem(target, sender),
     SEP,
     { label: 'Rename…', click: () => sender.send('tile:rename', sid) },
     { label: 'Copy address', click: () => clipboard.writeText(target.url) },
     { label: 'Open in system browser', click: () => openExternal(target.url) },
   ];
-  if (s && s.cwd) items.push({ label: editorCmd ? 'Open folder in VS Code' : 'Open folder', click: () => openFolder(s.cwd) });
+  const cwd = (s && s.cwd) || (p && p.start && p.start.cwd);
+  if (cwd) items.push({ label: editorCmd ? 'Open folder in VS Code' : 'Open folder', click: () => openFolder(cwd) });
   items.push(SEP);
   if (s) {
-    const isHidden = hidden.isHidden(s);
-    items.push({ label: isHidden ? 'Show on home' : 'Hide', click: () => { if (isHidden) hidden.unhide(s); else hidden.hide(s); pushServers(); } });
+    if (!p) {
+      const isHidden = hidden.isHidden(s);
+      items.push({ label: isHidden ? 'Show on home' : 'Hide', click: () => { if (isHidden) hidden.unhide(s); else hidden.hide(s); pushServers(); } });
+    }
+    if (s.pid && launch.commandOf(s)) items.push({ label: 'Restart server', click: () => restartServer(s) });
     if (s.pid) items.push({ label: 'Stop…', click: () => confirmStop(s) });
-  } else {
-    items.push({ label: 'Remove', click: () => removeNet(sid) });
+  } else if (n) {
+    items.push({ label: 'Remove', click: () => removeNet(n.id) });
+  } else if (p && p.local) {
+    items.push({ label: starting.has(p.key) ? 'Starting…' : 'Start server', enabled: launch.canStart(p.start) && !starting.has(p.key),
+                 click: () => startPinned(p.key) });
   }
+  if (launch.hasLog(target.key)) items.push({ label: 'Show server output', click: () => shell.openPath(launch.logFile(target.key)) });
+  if (items[items.length - 1] === SEP) items.pop();
   popup(items, BrowserWindow.fromWebContents(sender));
 }
 
@@ -713,6 +940,7 @@ async function confirmStop(s) {
 function removeNet(id) {
   const n = netapps.get(id);
   if (n) for (const t of [...tabs.values()]) if (t.key === n.url) closeTab(t.id);
+  if (n && prefs.isPinned(n.url)) unpin(n.url);
   netapps.remove(id);
   pushNet();
 }
@@ -738,6 +966,7 @@ function openFolder(dir) {
 ipcMain.handle('servers:list', () => publicServers());
 ipcMain.handle('servers:unhide', (_e, sid) => { const s = servers.get(sid); if (s) { hidden.unhide(s); pushServers(); } });
 ipcMain.handle('net:list', () => publicNet());
+ipcMain.handle('pins:list', () => publicPins());
 // One search of the local network at a time; a second request joins the running one.
 let discovering = null;
 ipcMain.handle('net:discover', (e) => {
@@ -759,6 +988,7 @@ ipcMain.handle('app:rename', (_e, sid, name) => {
   if (id) reinstall(id, prefs.getStandalone(id), prefs.getName(target.key) || target.title);
   pushServers();
   pushNet();
+  pushPins();
 });
 ipcMain.handle('tile:menu', (e, sid) => tileMenu(e.sender, sid));
 ipcMain.handle('home:menu', (e) => homeMenu(e.sender));
@@ -772,8 +1002,10 @@ ipcMain.handle('thumbs:want', (_e, sids) => {
 ipcMain.handle('tab:open', (_e, sid, other) => {
   const t = resolveTarget(sid);
   if (!t) return null;
+  if (!t.id) startPinned(t.key);   // a pinned app whose server is down
   return openTab(t, other ? { window: !opensInWindow(t.key) } : {});
 });
+ipcMain.handle('tab:start', (_e, id) => { const t = tabs.get(id); if (t) startPinned(t.key); });
 ipcMain.handle('tab:activate', (_e, id) => activateTab(id));
 ipcMain.handle('tab:close', (_e, id) => closeTab(id));
 ipcMain.handle('tab:menu', (_e, id) => { const t = tabs.get(id); if (t) tabMenu(t); });
@@ -784,6 +1016,39 @@ ipcMain.handle('chrome:resized', (e) => {
   else for (const t of tabs.values()) if (t.host === w) layoutWindow(t);
 });
 ipcMain.handle('frame:get', (_e, id) => { const t = tabs.get(id); return t ? publicTab(t) : null; });
+// Windows shows the unread count drawn by the chrome page (common.js badgeIcon) on the taskbar button.
+ipcMain.handle('chrome:badge', (e, count, png) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  if (!w || w.isDestroyed() || process.platform !== 'win32') return;
+  const img = count && /^data:image\/png;base64,/.test(String(png)) ? nativeImage.createFromDataURL(png) : null;
+  w.setOverlayIcon(img, count ? `${count} unread` : '');
+});
+
+// ---------- find in page ----------
+// The find field lives in the bar of the window the app is in (common.js).
+function openFind(t) {
+  const w = windowOf(t);
+  if (!w || w.isDestroyed()) return;
+  w.webContents.focus();
+  w.webContents.send('find:open');
+}
+function findTarget(sender) {
+  const w = BrowserWindow.fromWebContents(sender);
+  const t = w === win ? tabs.get(activeTab) : [...tabs.values()].find(x => x.host === w);
+  return t && !t.view.webContents.isDestroyed() ? t : null;
+}
+ipcMain.handle('find:query', (e, text, { forward = true, again = false } = {}) => {
+  const t = findTarget(e.sender);
+  if (!t) return;
+  if (!text) { t.view.webContents.stopFindInPage('clearSelection'); e.sender.send('find:result', { active: 0, matches: 0 }); return; }
+  t.view.webContents.findInPage(String(text), { forward, findNext: !again });
+});
+ipcMain.handle('find:close', (e) => {
+  const t = findTarget(e.sender);
+  if (!t) return;
+  t.view.webContents.stopFindInPage('keepSelection');
+  t.view.webContents.focus();
+});
 ipcMain.handle('chrome:color', (e, { color, symbolColor } = {}) => {
   const w = BrowserWindow.fromWebContents(e.sender);
   if (!w || w.isDestroyed() || typeof w.setTitleBarOverlay !== 'function') return;
@@ -826,6 +1091,108 @@ ipcMain.on('pw:captured', async (e, { username, password } = {}) => {
 ipcMain.handle('pw:list', () => ({ entries: passwords.list(), backend: passwords.backend() }));
 ipcMain.handle('pw:remove', (_e, id) => { passwords.remove(Number(id)); pushPasswords(); });
 
+function tabFor(wc) { return [...tabs.values()].find(t => t.view.webContents === wc) || null; }
+
+// ---------- notifications ----------
+// content-preload.js routes a page's `new Notification()` here, so it shows
+// the app's name and icon and a click brings the app's tab or window forward.
+const notes = new Map();   // "<webContents id>:<id>" -> { note, tab }; kept so click handlers survive
+
+function appIcon(t) {
+  const id = prefs.standaloneFor(t.key);
+  const src = (id && prefs.getStandalone(id)?.png) || t.icon;
+  if (!src || !src.startsWith('data:')) return undefined;
+  try { const img = nativeImage.createFromDataURL(src); return img.isEmpty() ? undefined : img; } catch { return undefined; }
+}
+
+ipcMain.on('note:show', (e, n = {}) => {
+  const t = tabFor(e.sender);
+  if (!t || !Notification.isSupported()) return;
+  const name = t.label || t.title;
+  let title = String(n.title || '').slice(0, 200);
+  if (!title.toLowerCase().includes(String(name).toLowerCase())) title = title ? `${name}: ${title}` : name;
+  const ref = `${e.sender.id}:${n.id}`;
+  if (n.tag) {   // same tag: the new one replaces the old
+    for (const [k, v] of notes) if (v.tab === t && v.tag === n.tag) { v.note.close(); notes.delete(k); }
+  }
+  const note = new Notification({ title, body: String(n.body || '').slice(0, 1000), silent: !!n.silent, icon: appIcon(t) });
+  const event = (type) => { if (!e.sender.isDestroyed()) e.sender.send('note:event', { id: n.id, type }); };
+  notes.set(ref, { note, tab: t, tag: n.tag || '' });
+  note.on('show', () => event('show'));
+  note.on('click', () => { event('click'); if (tabs.has(t.id)) reveal(t); });
+  note.on('close', () => { event('close'); notes.delete(ref); });
+  note.show();
+  const w = windowOf(t);
+  if (w && !w.isDestroyed() && !w.isFocused()) w.flashFrame(true);
+});
+ipcMain.on('note:close', (e, id) => {
+  const ref = `${e.sender.id}:${id}`;
+  notes.get(ref)?.note.close();
+  notes.delete(ref);
+});
+
+// ---------- permissions ----------
+// Notifications, fullscreen and the like are granted; camera, microphone,
+// location, screen capture and clipboard reading are asked for once per app.
+// Anything requested outside an app tab (e.g. a hidden thumbnail window) is refused.
+const ASK = {
+  camera: 'use your camera', microphone: 'use your microphone', geolocation: 'see your location',
+  'display-capture': 'record your screen', 'clipboard-read': 'read your clipboard',
+  midi: 'use MIDI devices', midiSysex: 'use MIDI devices', 'idle-detection': 'see when you are away',
+  openExternal: 'open another program',
+};
+function permKeys(permission, details) {
+  if (permission !== 'media') return [permission];
+  const types = details.mediaTypes && details.mediaTypes.length ? details.mediaTypes : ['audio', 'video'];
+  return [...new Set(types.map(x => (x === 'video' ? 'camera' : 'microphone')))];
+}
+function originOf(url) { try { return new URL(url).origin; } catch { return ''; } }
+
+const asking = new Map();   // one dialog per origin+request at a time
+async function requestPermission(wc, permission, details) {
+  const t = tabFor(wc);
+  if (!t) return false;
+  if (permission === 'openExternal' && /^(mailto|tel):/i.test(details.externalURL || '')) return true;
+  const keys = permKeys(permission, details);
+  if (!keys.some(k => ASK[k])) return true;
+  const origin = originOf(details.requestingUrl || wc.getURL());
+  const saved = keys.map(k => prefs.getPermission(origin, k));
+  if (saved.includes(false)) return false;
+  if (saved.every(v => v === true)) return true;
+  const ref = `${origin} ${keys.join('+')}`;
+  if (!asking.has(ref)) asking.set(ref, ask(t, origin, keys, details).finally(() => asking.delete(ref)));
+  return asking.get(ref);
+}
+async function ask(t, origin, keys, details) {
+  const what = keys.length === 2 && keys.includes('camera') ? 'use your camera and microphone' : ASK[keys[0]];
+  const { response, checkboxChecked } = await dialog.showMessageBox(windowOf(t), {
+    type: 'question', message: `Allow ${t.label || t.title} to ${what}?`,
+    detail: keys[0] === 'openExternal' ? String(details.externalURL || origin) : origin,
+    buttons: ['Allow', 'Block'], defaultId: 0, cancelId: 1, noLink: true,
+    checkboxLabel: 'Remember for this app', checkboxChecked: true,
+  });
+  const allowed = response === 0;
+  if (checkboxChecked) { for (const k of keys) prefs.setPermission(origin, k, allowed); pushPermissions(); }
+  return allowed;
+}
+// Checks (navigator.permissions, Notification.permission) say "granted" unless the user blocked it,
+// so apps go ahead and request, which is where Pane asks.
+function checkPermission(permission, origin, details) {
+  const keys = permission === 'media' ? [details.mediaType === 'video' ? 'camera' : 'microphone'] : [permission];
+  const o = originOf(origin);   // Electron passes "http://host:port/", stored ones have no slash
+  return !keys.some(k => prefs.getPermission(o, k) === false);
+}
+app.on('session-created', (ses) => {
+  ses.setPermissionRequestHandler((wc, permission, callback, details) => {
+    requestPermission(wc, permission, details).then(callback, () => callback(false));
+  });
+  ses.setPermissionCheckHandler((_wc, permission, origin, details) => checkPermission(permission, origin, details || {}));
+});
+
+function pushPermissions() { send('perm:update', prefs.listPermissions()); }
+ipcMain.handle('perm:list', () => prefs.listPermissions());
+ipcMain.handle('perm:forget', (_e, origin, permission) => { prefs.setPermission(String(origin), String(permission), null); pushPermissions(); });
+
 // ---------- windows ----------
 
 // The chrome pages hold the privileged API: never let them navigate or open windows.
@@ -837,8 +1204,9 @@ function guardChrome(wc) {
 function createWindow() {
   const dark = nativeTheme.shouldUseDarkColors;
   const bg = dark ? HOME_BG.dark : HOME_BG.light;
+  const bounds = savedBounds('main', { width: 1280, height: 800 });
   const w = new BrowserWindow({
-    ...savedBounds('main', { width: 1280, height: 800 }), minWidth: 560, minHeight: 360,
+    ...bounds, minWidth: 560, minHeight: 360,
     title: 'Pane', backgroundColor: bg, icon: ICON,
     // The tab bar doubles as the title bar; the OS only draws the window buttons on top of it.
     titleBarStyle: 'hidden',
@@ -846,10 +1214,16 @@ function createWindow() {
     webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   win = w;
+  mainOpened = true;
+  if (bounds.maximized) w.maximize();
   guardChrome(w.webContents);
   w.loadFile(path.join(RENDERER, 'index.html'));
   onResize(w, () => layout());
-  w.on('close', () => prefs.setBounds('main', w.getNormalBounds()));
+  w.on('close', () => {
+    prefs.setBounds('main', { ...w.getNormalBounds(), maximized: w.isMaximized() });
+    windowClosing();
+  });
+  w.on('focus', () => w.flashFrame(false));
   w.on('closed', () => {
     const own = mainTabs();
     win = null;
@@ -858,7 +1232,9 @@ function createWindow() {
   });
   w.on('app-command', (_e, cmd) => appCommand(tabs.get(activeTab)?.view.webContents, cmd));
   w.webContents.on('before-input-event', (e, input) => { if (handleKey(input, tabs.get(activeTab) || null)) e.preventDefault(); });
-  w.webContents.on('did-finish-load', () => { pushServers(); pushNet(); pushPasswords(); pushTabs(); });
+  w.webContents.on('did-finish-load', () => { pushServers(); pushNet(); pushPins(); pushPasswords(); pushPermissions(); pushTabs(); });
+  scan();   // the list may be stale after running with app windows only
+  scanNet();
 }
 
 // Dev aids: PANE_AUTOOPEN=<port>[,<port>…] opens those servers once discovered.
@@ -925,13 +1301,14 @@ if (!app.requestSingleInstanceLock()) {
     passwords.load();
     hidden.load();
     prefs.load();
-    thumbs.onUpdate(() => { if (prefs.getLayout() === 'previews') { pushServers(); pushNet(); } });
+    thumbs.onUpdate(() => { if (prefs.getLayout() === 'previews') { pushServers(); pushNet(); pushPins(); } });
     // Started from a detached app's launcher entry: just that app, no home screen.
     refreshStandalone();
-    if (!openStandalone(standalone.fromArgv(process.argv))) createWindow();
+    const solo = openStandalone(standalone.fromArgv(process.argv));
+    if (!solo) createWindow();
     devAids();
     detectEditor();
-    scan();
+    scan().then(() => { if (solo) restored = true; else restoreSession(); });
     scanNet();
     setInterval(scan, SCAN_INTERVAL_MS);
     setInterval(scanNet, SCAN_INTERVAL_MS);
@@ -940,4 +1317,5 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
+app.on('before-quit', freezeSession);
 app.on('window-all-closed', () => app.quit());

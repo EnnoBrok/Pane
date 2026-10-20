@@ -4,9 +4,11 @@
 
 Local and network web apps as desktop apps. Pane scans the machine for
 listening HTTP servers, shows them as app icons, and opens each one in a tab
-or in a window of its own, each with its own cookie store. Any app can be
-detached into a standalone app with its own launcher entry. Dev servers can be
-stopped from the UI so stray processes stay visible.
+or in a window of its own, each with its own cookie store. Apps you pin stay on
+top of the launcher even while their server is down, and a pinned local app
+starts its server again with one click. Any app can be detached into a
+standalone app with its own launcher entry. Servers can be stopped and
+restarted from the UI so stray processes stay visible.
 
 Pane used to be called AppBrowser; on first start it copies the old settings
 (`~/.config/appbrowser`) over. The OS keyring may tie saved passwords to the
@@ -70,7 +72,9 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   moved between the two, so the page keeps its state.
 - Home is a launcher: icons (favicons fetched by `src/main/icons.js`, or a
   colored letter), one search field that filters apps and adds a network
-  address on Enter. Everything else sits behind right-click: open in own
+  address on Enter. Pinned apps ("Pin to top"; detached apps are pinned too)
+  fill the middle; everything else found on this computer and the network is a
+  compact list below them. Everything else sits behind right-click: open in own
   window / always open in own window, rename, copy address, open in system
   browser, open folder in VS Code, hide, Stop (asks first, then SIGTERM to the
   process tree via `tree-kill`). Background services (JSON or HTML error pages
@@ -94,9 +98,20 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   opens only that app in its own window; if Pane already runs, the window
   opens there. On Windows the window also gets its own taskbar identity. The
   launcher icon is drawn by `rasterIcon` in `src/renderer/common.js`.
+- A pinned app stays on home while its server is down. For a local one Pane
+  remembers the executable, arguments and folder it was last seen running with
+  (from `/proc`, so Linux only), and clicking it starts the server again
+  (`src/main/launch.js`): detached from Pane, under its original process name,
+  without Pane's open file descriptors, output in `userData/logs`. The tab
+  shows "Starting…" until the server answers. Running servers have "Restart
+  server" in their menu.
+- The apps open when Pane closes are reopened on the next start (local ones
+  only if their server runs or they are pinned). Windows remember their
+  position and whether they were maximized; each app remembers its zoom.
 - `src/main/prefs.js` keeps custom names, apps that open in their own window,
-  window positions, the home layout (grid or previews) and detached apps in
-  `prefs.json` (userData).
+  window positions, the home layout (grid or previews), detached and pinned
+  apps, per-app zoom, the open apps and site permissions in `prefs.json`
+  (userData).
 - "Find network apps" (footer link, or right-click an empty spot on home)
   searches the local network once, on request: services announced over mDNS
   (`_http._tcp`, `_https._tcp`) and a sweep of common web ports (80, 443,
@@ -118,11 +133,22 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   forgotten in the Manage dialog.
 - `src/main/hidden.js` remembers local entries the user hid, keyed by process
   name and port.
+- Notifications: `content-preload.js` replaces the page's `Notification` class,
+  so notifications show the app's name and icon, and clicking one brings the
+  app forward; an unfocused window flashes. A count in the page title, like
+  "(3) Inbox", becomes a badge on the tab, the home icon and (Windows) the
+  taskbar button.
+- Permissions: camera, microphone, location, screen recording and clipboard
+  reading are asked for once per app; the answers are listed in Manage.
+  Notifications, fullscreen and the like are granted.
+- While only app windows are open (no launcher), Pane does not scan ports; it
+  just retries apps whose page failed.
 - Apps open in tabs, or in their own window if "Open apps in their own window"
   (right-click an empty spot on home) or the app's "Always open in own window"
   is set. Ctrl+click, middle-click or Ctrl+Enter opens an app the other way.
 - Shortcuts: Ctrl+T home/search, Ctrl+W close, Ctrl+Tab / Ctrl+1…9 switch
-  tabs, Alt+←/→ and the mouse thumb buttons navigate, Ctrl +/−/0 zoom, F5 and
+  tabs, Alt+←/→ and the mouse thumb buttons navigate, Ctrl+F find in page
+  (in the bar; Enter/Shift+Enter next/previous), Ctrl +/−/0 zoom, F5 and
   Ctrl+R reload, Ctrl+Shift+R and Ctrl+F5 hard reload (clears the app's HTTP
   cache, keeps cookies), F12 DevTools. On home, typing anywhere searches.
 - The windows have no native frame: the tab bar (or title strip) is the title
@@ -139,7 +165,7 @@ a running instance.
 
 ## Roadmap
 
-- Project list: register a folder plus command, launch it as a dev server from
-  the app, and stop it by closing its tab (the app owns that process group).
-- Find in page (Ctrl+F), reopen tabs and windows on start.
+- Start pinned local apps on Windows too (needs another process's working
+  folder, which Windows does not expose easily).
+- Reorder pinned apps by dragging.
 - Stop processes that are not owned by the current user (needs elevation).

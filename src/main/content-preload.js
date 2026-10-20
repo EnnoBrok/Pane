@@ -1,6 +1,61 @@
 // Runs inside every app tab (sandboxed, isolated world). Autofills saved logins
 // and reports new ones to the main process, which asks the user before saving.
-const { ipcRenderer } = require('electron');
+// Also routes the page's notifications through Pane (main.js, "notifications").
+const { ipcRenderer, contextBridge } = require('electron');
+
+// ---- notifications: the page's Notification class is replaced by one that main.js shows ----
+const noteCallbacks = new Map();
+let nextNote = 1;
+ipcRenderer.on('note:event', (_e, { id, type }) => {
+  const cb = noteCallbacks.get(id);
+  if (cb) cb(type);
+  if (type === 'close') noteCallbacks.delete(id);
+});
+try {
+  contextBridge.exposeInMainWorld('__paneNotify', {
+    show(title, opts, onEvent) {
+      const id = nextNote++;
+      if (typeof onEvent === 'function') noteCallbacks.set(id, onEvent);
+      const o = opts || {};
+      ipcRenderer.send('note:show', { id, title: String(title ?? ''), body: String(o.body ?? ''), tag: String(o.tag ?? ''), silent: !!o.silent });
+      return id;
+    },
+    close(id) { ipcRenderer.send('note:close', id); },
+  });
+  contextBridge.executeInMainWorld({
+    func: () => {
+      const bridge = window.__paneNotify;
+      const Native = window.Notification;
+      if (!bridge || !Native) return;
+      class Notification extends EventTarget {
+        constructor(title, options = {}) {
+          super();
+          if (title === undefined) throw new TypeError("Failed to construct 'Notification': 1 argument required.");
+          this.title = String(title);
+          this.body = String(options.body ?? '');
+          this.tag = String(options.tag ?? '');
+          this.icon = String(options.icon ?? '');
+          this.data = options.data ?? null;
+          this.silent = !!options.silent;
+          this.onclick = this.onshow = this.onclose = this.onerror = null;
+          if (Native.permission !== 'granted') { setTimeout(() => this._fire('error')); return; }
+          this._id = bridge.show(this.title, { body: this.body, tag: this.tag, silent: this.silent }, (type) => this._fire(type));
+        }
+        _fire(type) {
+          const e = new Event(type, { cancelable: type === 'click' });
+          this.dispatchEvent(e);
+          const h = this['on' + type];
+          if (typeof h === 'function') h.call(this, e);
+        }
+        close() { if (this._id) bridge.close(this._id); }
+        static get permission() { return Native.permission; }
+        static requestPermission(cb) { return Native.requestPermission(cb); }
+        static get maxActions() { return 0; }
+      }
+      window.Notification = Notification;
+    },
+  });
+} catch { /* the page keeps the plain notifications */ }
 
 function visible(el) { return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length); }
 function passwordField() { return [...document.querySelectorAll('input[type=password]')].find(visible); }

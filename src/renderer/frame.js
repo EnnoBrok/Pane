@@ -9,6 +9,7 @@ function render(t) {
   document.getElementById('ficon').innerHTML = t.loading ? '<span class="spin"></span>' : iconHtml(t.icon, t.title, t.key, 'ticon');
   document.getElementById('ftitle').textContent = t.title || t.url;
   document.title = t.title || 'Pane';
+  setBadge(t.count || 0);
   showStatus(t);
   applyTheme(t.theme);
 }

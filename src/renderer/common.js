@@ -81,14 +81,87 @@ function applyTheme(theme) {
   }
 }
 
-// Shown in place of a page whose server stopped answering.
+// Shown in place of a page whose server stopped answering, or is being started.
 function showStatus(t) {
   const el = document.getElementById('status');
   el.hidden = !(t && t.failed);
   if (el.hidden) return;
-  el.querySelector('h3').textContent = `${t.title || 'This app'} isn’t responding`;
-  el.querySelector('p').textContent = `${t.failed[0].toUpperCase()}${t.failed.slice(1)}. It reloads by itself once the app is back.`;
-  el.querySelector('button').onclick = () => window.pane.retryTab(t.id);
+  const name = t.title || 'This app';
+  const [h, p, button] = ['h3', 'p', 'button'].map(s => el.querySelector(s));
+  el.classList.toggle('starting', !!t.starting);
+  button.hidden = !!t.starting;
+  if (t.starting) {
+    h.textContent = `Starting ${name}…`;
+    p.textContent = 'It opens as soon as its server answers.';
+  } else if (t.canStart) {
+    h.textContent = `${name} isn’t running`;
+    p.textContent = 'Start it from here; it also reloads by itself once it is back.';
+    button.textContent = 'Start';
+    button.onclick = () => window.pane.startTab(t.id);
+  } else {
+    h.textContent = `${name} isn’t responding`;
+    p.textContent = `${t.failed[0].toUpperCase()}${t.failed.slice(1)}. It reloads by itself once the app is back.`;
+    button.textContent = 'Retry now';
+    button.onclick = () => window.pane.retryTab(t.id);
+  }
+}
+
+// Unread count for the taskbar button (Windows draws it over the icon).
+let lastBadge = -1;
+function setBadge(count) {
+  if (count === lastBadge) return;
+  lastBadge = count;
+  if (!count) { window.pane.setBadge(0, ''); return; }
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = '#e5484d';
+  g.beginPath(); g.arc(16, 16, 16, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#fff';
+  g.font = `600 ${count > 9 ? 16 : 20}px "Segoe UI", system-ui, sans-serif`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(count > 99 ? '99+' : String(count), 16, 17);
+  window.pane.setBadge(count, c.toDataURL('image/png'));
+}
+
+// ---------- find in page ----------
+// Ctrl+F opens a field in the bar; the page itself is searched by main.js.
+const finder = {
+  el: document.getElementById('find'),
+  input: document.getElementById('find-q'),
+  count: document.getElementById('find-n'),
+  open() {
+    this.el.hidden = false;
+    this.input.focus();
+    this.input.select();
+    if (this.input.value) window.pane.find(this.input.value, {});
+  },
+  close() {
+    if (this.el.hidden) return;
+    this.el.hidden = true;
+    this.count.textContent = '';
+    window.pane.findClose();
+  },
+  step(forward) { if (this.input.value) window.pane.find(this.input.value, { forward, again: true }); },
+};
+if (finder.el) {
+  window.pane.onFindOpen(() => finder.open());
+  window.pane.onFindResult(({ active, matches }) => {
+    finder.count.textContent = finder.input.value ? `${matches ? active : 0}/${matches}` : '';
+    finder.el.classList.toggle('none', !!finder.input.value && !matches);
+  });
+  finder.input.addEventListener('input', () => window.pane.find(finder.input.value, {}));
+  finder.input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finder.step(!e.shiftKey); }
+    if (e.key === 'Escape') { e.preventDefault(); finder.close(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); finder.input.select(); }
+  });
+  finder.el.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-find]');
+    if (!b) return;
+    if (b.dataset.find === 'close') finder.close(); else finder.step(b.dataset.find === 'next');
+  });
 }
 
 // The page views sit on top of this chrome page and are sized by main.js; the
