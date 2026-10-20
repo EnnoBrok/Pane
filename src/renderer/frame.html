@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <title>Pane</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="frame">
+  <header id="tabbar" title="Right-click for options">
+    <span id="ficon"></span>
+    <span id="ftitle"></span>
+  </header>
+
+  <div id="status" hidden>
+    <div>
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+      <h3></h3>
+      <p></p>
+      <button>Retry now</button>
+    </div>
+  </div>
+
+  <script src="common.js"></script>
+  <script src="frame.js"></script>
+</body>
+</html>

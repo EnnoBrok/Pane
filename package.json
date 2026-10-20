@@ -1,0 +1,49 @@
+{
+  "name": "pane",
+  "version": "0.2.0",
+  "description": "Local and network web apps as desktop apps: finds running servers and opens each in a tab or its own window",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:linux": "electron-builder --linux",
+    "dist:win": "electron-builder --win",
+    "icons": "electron scripts/icons.js"
+  },
+  "author": "Enno Brokof",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^44.9.1",
+    "electron-builder": "^26.5.0",
+    "resedit": "3.0.2"
+  },
+  "dependencies": {
+    "tree-kill": "^1.2.2"
+  },
+  "build": {
+    "appId": "io.github.ennobrok.pane",
+    "productName": "Pane",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development",
+      "icon": "src/assets/icon.png",
+      "executableName": "pane"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "src/assets/icon.ico",
+      "signAndEditExecutable": false,
+      "artifactName": "${productName}-${version}.${ext}"
+    },
+    "afterPack": "scripts/win-exe-resources.js"
+  },
+  "productName": "Pane"
+}
