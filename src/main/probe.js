@@ -1,6 +1,8 @@
 // Asks a port whether it speaks HTTP and what it serves.
+const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const { fileURLToPath } = require('node:url');
 
 const MAX_BODY = 64 * 1024;
 
@@ -54,10 +56,26 @@ function classify(res) {
   return { kind, title, status: res.status };
 }
 
+// A local file stands in for a server: the start of its contents, like a 200 answer.
+async function probeFile(url) {
+  let body;
+  try {
+    const fh = await fs.promises.open(fileURLToPath(url));
+    try {
+      const buf = Buffer.alloc(MAX_BODY);
+      const { bytesRead } = await fh.read(buf, 0, MAX_BODY, 0);
+      body = buf.toString('utf8', 0, bytesRead);
+    } finally { await fh.close(); }
+  } catch { return null; }
+  const res = { status: 200, headers: { 'content-type': 'text/html' }, body };
+  return { ...classify(res), url, finalUrl: url, body };
+}
+
 // Probes a full URL (for user-added network apps). Returns null when unreachable.
 async function probeUrl(url, timeout = 3000) {
   let u;
   try { u = new URL(url); } catch { return null; }
+  if (u.protocol === 'file:') return probeFile(url);
   let res = null;
   // Follow a few same-host redirects (e.g. "/" -> "/login") so the title is useful.
   for (let hop = 0; hop < 3; hop++) {

@@ -230,11 +230,21 @@ function resolveTarget(sid) {
   }
   const n = netapps.get(sid);
   if (n) {
-    let host = n.url; try { host = new URL(n.url).host; } catch { /* keep */ }
+    const host = netapps.hostOf(n.url);
     return { id: n.id, key: n.url, url: n.url, icon: n.icon, label: prefs.getName(n.url),
-             title: n.title || host, partition: `persist:net-${host}` };
+             title: n.title || host, partition: netapps.isFile(n.url) ? 'persist:files' : `persist:net-${host}` };
   }
   return null;
+}
+
+// "pane something.html" (or a file: URL) adds the file and opens it; returns the tab id or null.
+function openFileArg(argv) {
+  const arg = argv.slice(1).find(a => !a.startsWith('-') && netapps.looksLikeFile(a) && netapps.normalize(a));
+  if (!arg) return null;
+  const r = netapps.add(arg);
+  if (r.ok) { pushNet(); scanNet(); }
+  const target = r.id && resolveTarget(r.id);
+  return target ? openTab(target) : null;
 }
 
 // ---------- tabs and app windows ----------
@@ -363,13 +373,13 @@ function restoreSession() {
   const live = new Set([...servers.values()].filter(x => x.kind === 'html').map(serverKey));
   let active = null;
   for (const e of prefs.getSession()) {
-    if (!/^https?:\/\//.test(e.key) && !live.has(e.key) && !prefs.isPinned(e.key)) continue;
+    if (!/^(https?|file):\/\//.test(e.key) && !live.has(e.key) && !prefs.isPinned(e.key)) continue;
     if ([...tabs.values()].some(t => t.key === e.key)) continue;
     const id = openTab({ id: null, key: e.key, url: e.url, title: e.title, label: prefs.getName(e.key), icon: e.icon, partition: e.partition },
       { window: !!e.window });
     if (e.active) active = id;
   }
-  if (win && !win.isDestroyed()) activateTab(active || 'home');
+  if (win && !win.isDestroyed()) activateTab(active || activeTab || 'home');   // a file from the command line stays on top
 }
 
 // Samples the top strip of the page and reports its average color, so the
@@ -451,7 +461,7 @@ function openTab(target, opts = {}) {
 
 // A link from inside an app, opened next to it with the same cookies.
 function openLink(from, url) {
-  let host = url; try { host = new URL(url).host; } catch { /* keep */ }
+  const host = netapps.hostOf(url);
   openTab({ id: null, key: `link:${nextLinkId++}`, url, title: host, icon: from.icon, partition: from.partition }, { window: false });
 }
 
@@ -510,6 +520,7 @@ function wire(t) {
   wc.setWindowOpenHandler(({ url }) => {
     let u;
     try { u = new URL(url); } catch { return { action: 'deny' }; }
+    if (u.protocol === 'file:' && t.url.startsWith('file:')) { openLink(t, url); return { action: 'deny' }; }   // a local page opening another
     if (!/^https?:$/.test(u.protocol)) return { action: 'deny' };
     let own = '';
     try { own = new URL(t.url).host; } catch { /* keep */ }
@@ -811,7 +822,7 @@ function setLayout(layout) {
 function publicView() { return { layout: prefs.getLayout(), windowsByDefault: prefs.windowsByDefault() }; }
 function pushView() { send('view:update', publicView()); }
 
-function openExternal(url) { if (/^(https?|mailto):/i.test(url)) shell.openExternal(url); }
+function openExternal(url) { if (/^(https?|mailto|file):/i.test(url)) shell.openExternal(url); }
 
 function navItems(wc) {
   const h = wc.navigationHistory;
@@ -899,8 +910,9 @@ function tileMenu(sender, sid) {
     { label: 'Copy address', click: () => clipboard.writeText(target.url) },
     { label: 'Open in system browser', click: () => openExternal(target.url) },
   ];
-  const cwd = (s && s.cwd) || (p && p.start && p.start.cwd);
+  const cwd = (s && s.cwd) || (p && p.start && p.start.cwd) || (n && netapps.dirOf(n.url));
   if (cwd) items.push({ label: editorCmd ? 'Open folder in VS Code' : 'Open folder', click: () => openFolder(cwd) });
+  if (n && netapps.isFile(n.url)) items.push({ label: 'Show in folder', click: () => shell.showItemInFolder(netapps.pathOf(n.url)) });
   items.push(SEP);
   if (s) {
     if (!p) {
@@ -1294,7 +1306,11 @@ if (process.platform === 'win32') app.setAppUserModelId('io.github.ennobrok.pane
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', (_e, argv) => { if (!openStandalone(standalone.fromArgv(argv))) showHome(false); });
+  app.on('second-instance', (_e, argv) => {
+    const file = openFileArg(argv);
+    if (file) { const t = tabs.get(file); if (t) reveal(t); }
+    else if (!openStandalone(standalone.fromArgv(argv))) showHome(false);
+  });
   app.whenReady().then(() => {
     Menu.setApplicationMenu(null);   // no hidden menu bar; shortcuts live in handleKey
     netapps.load();
@@ -1306,6 +1322,7 @@ if (!app.requestSingleInstanceLock()) {
     refreshStandalone();
     const solo = openStandalone(standalone.fromArgv(process.argv));
     if (!solo) createWindow();
+    openFileArg(process.argv);
     devAids();
     detectEditor();
     scan().then(() => { if (solo) restored = true; else restoreSession(); });

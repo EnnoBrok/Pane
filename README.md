@@ -124,6 +124,13 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   probes them every 15 s following same-host redirects, and marks unreachable
   ones offline. They open in tabs with a cookie partition per host, and
   self-signed certificates on those hosts are accepted.
+- Local HTML files are added the same way: type or paste a path
+  (`~/Downloads/report.html`, `/srv/docs/index.html`, `C:\…`) or a `file://`
+  URL into the search field, drop the file onto home, or start Pane with the
+  file as an argument (`pane report.html`; a running instance opens it). They
+  are listed under "Files", get their `<title>` and `<link rel=icon>`, share
+  one cookie partition (`persist:files`), and show "offline" while the file is
+  missing. The tile menu has "Show in folder".
 - `src/main/content-preload.js` runs sandboxed inside every tab. It autofills a
   saved login for the page's origin and, after a login form disappears or the
   URL changes, reports the typed credentials. `src/main/passwords.js` stores

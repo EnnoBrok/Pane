@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const on = (channel) => (cb) => ipcRenderer.on(channel, (_e, data) => cb(data));
 
@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('pane', {
   listNet: () => ipcRenderer.invoke('net:list'),
   onNet: on('net:update'),
   addNet: (input) => ipcRenderer.invoke('net:add', input),
+  pathOf: (file) => webUtils.getPathForFile(file),   // a File dropped on home
   listPins: () => ipcRenderer.invoke('pins:list'),
   onPins: on('pins:update'),
   discover: () => ipcRenderer.invoke('net:discover'),

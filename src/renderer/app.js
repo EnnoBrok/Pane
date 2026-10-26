@@ -15,7 +15,8 @@ let rendering = false;
 
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || '';
-const looksLikeAddress = (s) => /^(https?:\/\/)?[\w.-]+(:\d+)?(\/\S*)?$/i.test(s) && /[.:]|^localhost/i.test(s);
+const looksLikeFile = (s) => /^file:/i.test(s) || /^(~[\\/]|[\\/]|[a-zA-Z]:[\\/])/.test(s);   // netapps.looksLikeFile
+const looksLikeAddress = (s) => looksLikeFile(s) || (/^(https?:\/\/)?[\w.-]+(:\d+)?(\/\S*)?$/i.test(s) && /[.:]|^localhost/i.test(s));
 const CLOSE_ICON = '<svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2 2l6 6M8 2l-6 6"/></svg>';
 
 // ---------- home ----------
@@ -32,7 +33,7 @@ function apps() {
     tip: [s.url, s.cwd, s.name && `${s.name} · pid ${s.pid}`].filter(Boolean).join('\n'),
   }));
   const network = netApps.map(a => ({
-    id: a.id, key: a.key, icon: a.icon, thumb: a.thumb, offline: a.online === false,
+    id: a.id, key: a.key, icon: a.icon, thumb: a.thumb, offline: a.online === false, file: a.file,
     name: a.label || a.title || a.host,
     sub: a.host,
     tip: a.url,
@@ -93,6 +94,7 @@ function renderHome() {
   $('#pin-sec').hidden = !p.length;
   $('#local-sec').hidden = !l.length;
   $('#net-sec').hidden = !n.length;
+  $('#net-sec .section-label').textContent = n.some(a => a.file) ? (n.every(a => a.file) ? 'Files' : 'Network and files') : 'Network';
   for (const h of document.querySelectorAll('#rest .section-label')) h.hidden = !hasPins && !(l.length && n.length);
   $('#pin-hint').hidden = hasPins || !!q || !(l.length + n.length);
 
@@ -294,8 +296,28 @@ search.addEventListener('keydown', async (e) => {
   if (first) { api.openTab(first.dataset.id, e.ctrlKey || e.metaKey); clearSearch(); return; }
   const value = search.value.trim();
   if (!value || !looksLikeAddress(value)) return;
+  addAndOpen(value);
+});
+
+// Adds an address or local file and opens it; an entry already in the list just opens.
+async function addAndOpen(value) {
   const r = await api.addNet(value);
-  if (r.ok) { clearSearch(); api.openTab(r.id); } else { notice = r.error; renderHome(); }
+  if (r.id) { clearSearch(); api.openTab(r.id); } else { notice = r.error; renderHome(); }
+}
+
+// Drop an HTML file (from the file manager) or a link onto home to add it.
+// Anywhere else a drop would navigate the chrome itself, so it is swallowed.
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
+const home = $('#home');
+home.addEventListener('dragover', (e) => { e.preventDefault(); home.classList.add('dropping'); });
+home.addEventListener('dragleave', (e) => { if (!home.contains(e.relatedTarget)) home.classList.remove('dropping'); });
+home.addEventListener('drop', (e) => {
+  e.preventDefault();
+  home.classList.remove('dropping');
+  const file = e.dataTransfer.files[0];
+  const value = file ? api.pathOf(file) : (e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text')).split(/\r?\n/).find(l => l && !l.startsWith('#'));
+  if (value) addAndOpen(value.trim());
 });
 
 $('#home').addEventListener('click', (e) => {

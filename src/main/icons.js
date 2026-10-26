@@ -1,7 +1,9 @@
 // Finds an app's icon and returns it as a data: URL, so the chrome
 // (CSP img-src 'self' data:) can show it without loading remote content.
+const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const { fileURLToPath } = require('node:url');
 const { nativeTheme } = require('electron');
 
 const MAX_BYTES = 256 * 1024;
@@ -11,6 +13,11 @@ function get(url, hops = 3) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch { return resolve(null); }
+    if (u.protocol === 'file:') {   // an icon next to a local HTML file
+      let p; try { p = fileURLToPath(u); } catch { return resolve(null); }
+      const type = /\.svg$/i.test(p) ? 'image/svg+xml' : '';
+      return fs.readFile(p, (err, buf) => resolve(err || buf.length > MAX_BYTES ? null : { type, buf }));
+    }
     if (!/^https?:$/.test(u.protocol)) return resolve(null);
     let done = false;
     const finish = (v) => { if (!done) { done = true; clearTimeout(deadline); req.destroy(); resolve(v); } };

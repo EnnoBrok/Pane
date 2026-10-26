@@ -1,6 +1,9 @@
-// User-added network apps (e.g. http://tools.local), persisted in userData.
+// User-added network apps (e.g. http://tools.local) and local HTML files
+// (file:///…), persisted in userData.
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { pathToFileURL, fileURLToPath } = require('node:url');
 const { app } = require('electron');
 const { probeUrl } = require('./probe');
 const icons = require('./icons');
@@ -24,10 +27,33 @@ function save() {
   try { fs.writeFileSync(FILE(), JSON.stringify(list, null, 2)); } catch { /* ignore */ }
 }
 
-// Accepts "tools.local", "tools.local:8080/path", "https://x.y"; returns a normalized URL or null.
+// "file:///…", "/home/me/x.html", "~/x.html" or "C:\\x.html" name a local file.
+function looksLikeFile(s) { return /^file:/i.test(s) || /^(~[\\/]|[\\/]|[a-zA-Z]:[\\/])/.test(s); }
+function isFile(url) { return /^file:/i.test(url); }
+function pathOf(url) { try { return fileURLToPath(url); } catch { return ''; } }
+function dirOf(url) { const p = pathOf(url); return p ? path.dirname(p) : ''; }
+// What a tile shows under a network app's name: its host, or the file name.
+function hostOf(url) {
+  if (isFile(url)) return path.basename(pathOf(url)) || url;
+  try { return new URL(url).host; } catch { return url; }
+}
+
+// The file URL of an existing local file, or null.
+function normalizeFile(s) {
+  let p;
+  if (/^file:/i.test(s)) p = pathOf(s);
+  else p = /^~[\\/]/.test(s) ? path.join(os.homedir(), s.slice(2)) : s;
+  if (!p) return null;
+  p = path.resolve(p);
+  try { if (!fs.statSync(p).isFile()) return null; } catch { return null; }
+  return pathToFileURL(p).href;
+}
+
+// Accepts "tools.local", "tools.local:8080/path", "https://x.y" or a local file; returns a normalized URL or null.
 function normalize(input) {
   let s = String(input || '').trim();
   if (!s) return null;
+  if (looksLikeFile(s)) return normalizeFile(s);
   if (!/^[a-z]+:\/\//i.test(s)) s = 'http://' + s;
   try {
     const u = new URL(s);
@@ -36,10 +62,12 @@ function normalize(input) {
   } catch { return null; }
 }
 
+// On "Already in the list" the id of the existing entry is returned too, so the caller can open it.
 function add(input) {
   const url = normalize(input);
-  if (!url) return { ok: false, error: 'Not a valid address' };
-  if ([...apps.values()].some(a => a.url === url)) return { ok: false, error: 'Already in the list' };
+  if (!url) return { ok: false, error: looksLikeFile(String(input || '').trim()) ? 'No such file' : 'Not a valid address' };
+  const dup = [...apps.values()].find(a => a.url === url);
+  if (dup) return { ok: false, error: 'Already in the list', id: dup.id };
   const id = `net:${nextId++}`;
   apps.set(id, { id, url, title: '', kind: null, online: null, probedAt: 0, icon: '' });
   save();
@@ -75,16 +103,13 @@ async function refresh(maxAge) {
 }
 
 function list() {
-  return [...apps.values()].map(({ id, url, title, kind, online, icon }) => {
-    let host = url;
-    try { host = new URL(url).host; } catch { /* keep */ }
-    return { id, url, title, kind, online, host, icon };
-  });
+  return [...apps.values()].map(({ id, url, title, kind, online, icon }) =>
+    ({ id, url, title, kind, online, host: hostOf(url), icon, file: isFile(url) }));
 }
 
 function get(id) { return apps.get(id); }
 function hostnames() {
-  return [...apps.values()].map(a => { try { return new URL(a.url).hostname; } catch { return ''; } });
+  return [...apps.values()].filter(a => !isFile(a.url)).map(a => { try { return new URL(a.url).hostname; } catch { return ''; } });
 }
 
-module.exports = { load, add, remove, refresh, list, get, hostnames };
+module.exports = { load, add, remove, refresh, list, get, hostnames, normalize, looksLikeFile, isFile, pathOf, dirOf, hostOf };
