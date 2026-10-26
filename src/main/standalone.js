@@ -115,4 +115,4 @@ function uninstall(id, file) {
   }
 }
 
-module.exports = { supported, idFor, fromArgv, appUserModelId, install, exists, isCurrent, uninstall, iconPath };
+module.exports = { supported, idFor, fromArgv, appUserModelId, launchCommand, install, exists, isCurrent, uninstall, iconPath };

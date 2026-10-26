@@ -15,6 +15,7 @@ const standalone = require('./standalone');
 const thumbs = require('./thumbs');
 const { discover } = require('./discover');
 const { selfInstall } = require('./install');
+const { register } = require('./register');
 const launch = require('./launch');
 
 const TAB_BAR_HEIGHT = 40;
@@ -1320,6 +1321,7 @@ if (!app.requestSingleInstanceLock()) {
     thumbs.onUpdate(() => { if (prefs.getLayout() === 'previews') { pushServers(); pushNet(); pushPins(); } });
     // Started from a detached app's launcher entry: just that app, no home screen.
     refreshStandalone();
+    register(standalone.launchCommand);   // "Open with Pane" for HTML files
     const solo = openStandalone(standalone.fromArgv(process.argv));
     if (!solo) createWindow();
     openFileArg(process.argv);
@@ -1330,7 +1332,7 @@ if (!app.requestSingleInstanceLock()) {
     setInterval(scan, SCAN_INTERVAL_MS);
     setInterval(scanNet, SCAN_INTERVAL_MS);
     // Started as the portable exe: install a copy that starts without unpacking, once the window is up.
-    setTimeout(() => selfInstall().then((ok) => { if (ok) refreshStandalone(); }), 5000);
+    setTimeout(() => selfInstall().then((ok) => { if (ok) { refreshStandalone(); register(standalone.launchCommand); } }), 5000);
   });
 }
 

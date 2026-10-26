@@ -131,6 +131,13 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   are listed under "Files", get their `<title>` and `<link rel=icon>`, share
   one cookie partition (`persist:files`), and show "offline" while the file is
   missing. The tile menu has "Show in folder".
+- "Open with Pane": on start, a packaged Pane registers itself as a handler
+  for HTML files (`src/main/register.js`): `~/.local/share/applications/pane.desktop`
+  with `MimeType=text/html` on Linux, which also puts the AppImage into the app
+  menu; a `Pane.HTML` ProgID under HKCU with `OpenWithProgids` for `.html`,
+  `.htm` and `.xhtml` on Windows, written with `reg.exe` once the self-install
+  is in place. Pane does not make itself the default for HTML files. From
+  source this happens only with `PANE_REGISTER=1`.
 - `src/main/content-preload.js` runs sandboxed inside every tab. It autofills a
   saved login for the page's origin and, after a login form disappears or the
   URL changes, reports the typed credentials. `src/main/passwords.js` stores
