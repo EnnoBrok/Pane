@@ -511,12 +511,14 @@ function windowClosing() {
 }
 
 // Local apps come back only if their server runs (or they are pinned, or have a pane.sh); a dev server that is gone stays closed.
+// Windows of standalone apps stay closed: starting Pane opens Pane, each standalone app has its own launcher.
 function restoreSession() {
   restored = true;
   const live = new Set([...servers.values()].filter(x => x.kind === 'html').map(serverKey));
   let active = null;
   for (const e of prefs.getSession()) {
     if (!/^(https?|file):\/\//.test(e.key) && !live.has(e.key) && !prefs.isPinned(e.key) && !paneapps.get(e.key)) continue;
+    if (e.window && prefs.standaloneFor(e.key)) continue;   // a standalone app starts from its own launcher entry, not with Pane
     if ([...tabs.values()].some(t => t.key === e.key)) continue;
     const id = openTab({ id: null, key: e.key, url: e.url, title: e.title, label: prefs.getName(e.key), icon: e.icon, partition: e.partition },
       { window: !!e.window });
