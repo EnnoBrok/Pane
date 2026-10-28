@@ -6,7 +6,8 @@ Local and network web apps as desktop apps. Pane scans the machine for
 listening HTTP servers, shows them as app icons, and opens each one in a tab
 or in a window of its own, each with its own cookie store. Apps you pin stay on
 top of the launcher even while their server is down, and a pinned local app
-starts its server again with one click. Any app can be detached into a
+starts its server again with one click. A web app folder with a `pane.sh`
+shows up even if it never ran on this machine, and starts with a click. Any app can be detached into a
 standalone app with its own launcher entry. Servers can be stopped and
 restarted from the UI so stray processes stay visible.
 
@@ -105,6 +106,26 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   without Pane's open file descriptors, output in `userData/logs`. The tab
   shows "Starting…" until the server answers. Running servers have "Restart
   server" in their menu.
+- Apps with a `pane.sh` (see below) are found by `src/main/paneapps.js`: it
+  looks for `<root>/*/pane.sh` and `<root>/*/*/pane.sh` (not deeper, and not
+  into `node_modules`, `venv`, `dist`, `out` or dot folders such as `.git`)
+  at start, every 60 s, when the main window gets focus and when "Find network
+  apps" runs. The roots are `~/Dokumente`, `~/Documents`, `~/Projects` and
+  `~/src` where they exist, plus the parent folders of the working folders of
+  local servers Pane has seen (inside the home folder only; remembered in
+  `prefs.json` as `serverFolders`). To search other folders instead of the
+  default ones, set `"appFolders": ["~/work", "/srv/apps"]` in `prefs.json`
+  (while Pane is closed). Each app is a tile on home also while its server is
+  down; clicking it runs its `pane.sh` from its folder the same way a pinned
+  app is started (detached, file descriptors closed, output in
+  `userData/logs`, "Starting…" until the port answers). A server listening
+  on the app's port, in the app's folder (or the process Pane started for it),
+  is that app: one tile, known by the folder (`pane:<folder>`), so names, pins
+  and windows stay with it; what was pinned or named under the process name
+  moves over. Its menu has Start / Restart server, Stop…, Open folder and Show
+  server output; Restart runs the `pane.sh` again. A `pane.sh` without name or
+  port, or not executable, is skipped with a note on stderr. Linux (and other
+  Unix) only; on Windows nothing is searched.
 - The apps open when Pane closes are reopened on the next start (local ones
   only if their server runs or they are pinned). Windows remember their
   position and whether they were maximized; each app remembers its zoom.
@@ -176,6 +197,35 @@ Dev aids: `PANE_AUTOOPEN=<port>[,<port>…]` opens those servers on start,
 (`<file>.tab.png`, `<file>.win<N>.png`) after `PANE_SCREENSHOT_DELAY` ms
 and exits. `PANE_USER_DATA=<dir>` uses a separate profile, to test next to
 a running instance.
+
+## Make your app startable from Pane
+
+Put an executable `pane.sh` into the app's folder (`chmod +x pane.sh`). Pane
+runs it with that folder as working folder; it should start the server in the
+foreground, best by `exec`-ing it, so stopping the server ends the script too.
+The comment lines at the top tell Pane about the app; name and port are
+required, the rest is optional:
+
+```sh
+#!/usr/bin/env bash
+# pane.name: MFG Builder
+# pane.port: 8770
+# pane.icon: ui/favicon.svg
+# pane.description: Builds manufacturing jobs from CAD parts
+set -e
+exec ./venv/bin/python -u server.py --port 8770
+```
+
+- `pane.name`: the tile's name (renaming it in Pane still wins).
+- `pane.port`: the port the server listens on; Pane opens
+  `http://127.0.0.1:<port>/` and recognizes the running server by it.
+- `pane.icon`: an image inside the folder (SVG, PNG, ICO, …), path relative to
+  it; otherwise the page's favicon, or a letter.
+- `pane.description`: shown in the tile's tooltip.
+
+Only the comment block at the very top is read (the first line that is not a
+comment ends it). The script gets Pane's environment without Electron's
+additions; its output is in the log behind "Show server output".
 
 ## Roadmap
 

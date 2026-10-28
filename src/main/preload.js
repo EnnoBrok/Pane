@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('pane', {
   pathOf: (file) => webUtils.getPathForFile(file),   // a File dropped on home
   listPins: () => ipcRenderer.invoke('pins:list'),
   onPins: on('pins:update'),
+  listPaneApps: () => ipcRenderer.invoke('paneapps:list'),   // folders with a pane.sh
+  onPaneApps: on('paneapps:update'),
   discover: () => ipcRenderer.invoke('net:discover'),
   onDiscoverProgress: on('net:discover-progress'),
   onDiscoverOpen: on('home:discover'),

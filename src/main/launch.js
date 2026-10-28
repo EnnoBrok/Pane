@@ -2,7 +2,8 @@
 // running with: executable, arguments and working folder, read from /proc on
 // Linux (scanner.js). Windows does not expose another process's folder, so
 // there a pinned local app can be opened but not started. The server runs on
-// its own, detached from Pane; its output goes to userData/logs.
+// its own, detached from Pane; its output goes to userData/logs. An app with a
+// pane.sh (paneapps.js) is started through that script the same way.
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -15,7 +16,12 @@ function commandOf(s) {
   return { exe: s.exe || '', argv: s.argv, cwd: s.cwd };
 }
 
-function canStart(cmd) { return !!(cmd && cmd.argv && cmd.argv.length && cmd.cwd && fs.existsSync(cmd.cwd)); }
+// A pane.sh, run as it is from its own folder.
+function scriptCommand(file) { return { exe: '', argv: [file], cwd: path.dirname(file), script: true }; }
+
+function canStart(cmd) {
+  return !!(cmd && cmd.argv && cmd.argv.length && cmd.cwd && fs.existsSync(cmd.cwd) && (!cmd.script || fs.existsSync(cmd.argv[0])));
+}
 
 function logFile(key) {
   const dir = path.join(app.getPath('userData'), 'logs');
@@ -59,7 +65,8 @@ const CLOSE_FDS = 'for p in /proc/$$/fd/*; do n=${p##*/}; [ "$n" -gt 2 ] && eval
 
 // Returns the child process; throws when it cannot be spawned.
 function start(key, cmd) {
-  const env = cleanEnv(cmd.exe || cmd.argv[0]);
+  // A script's folder is no runtime: it stays off the PATH.
+  const env = cleanEnv(cmd.script ? '' : cmd.exe || cmd.argv[0]);
   const bin = program(cmd, env);
   const [file, args] = process.platform === 'linux' && fs.existsSync('/bin/bash')
     ? ['/bin/bash', ['-c', CLOSE_FDS, 'pane-start', cmd.argv[0], bin, ...cmd.argv.slice(1)]]
@@ -77,4 +84,4 @@ function start(key, cmd) {
   }
 }
 
-module.exports = { commandOf, canStart, start, logFile, hasLog };
+module.exports = { commandOf, scriptCommand, canStart, start, logFile, hasLog };

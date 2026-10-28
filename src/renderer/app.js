@@ -5,6 +5,7 @@ let servers = [];
 let loaded = false;           // first scan arrived; until then "no apps" would be a lie
 let netApps = [];
 let pins = [];
+let paneApps = [];            // folders with a pane.sh, running or not
 let logins = { entries: [], backend: '' };
 let perms = [];
 let tabState = { active: 'home', tabs: [], open: [], counts: {} };
@@ -24,14 +25,27 @@ const CLOSE_ICON = '<svg width="10" height="10" viewBox="0 0 10 10" stroke="curr
 let view = { layout: 'grid' };   // home layout: 'grid' (small tiles) or 'previews' (prefs.js)
 
 // Pinned apps ("my apps") first, in pin order and also while their server is
-// down; then the rest of what runs on this computer and on the network.
+// down; then the rest of what runs on this computer (pane.sh apps that are
+// down after the running servers) and on the network.
 function apps() {
   const local = servers.filter(s => s.kind === 'html').map(s => ({
     id: s.id, key: s.key, icon: s.icon, thumb: s.thumb, hidden: s.hidden,
-    name: s.label || s.title || baseName(s.cwd) || s.name || `:${s.port}`,
+    name: s.label || s.appName || s.title || baseName(s.cwd) || s.name || `:${s.port}`,
     sub: `:${s.port}`,
-    tip: [s.url, s.cwd, s.name && `${s.name} · pid ${s.pid}`].filter(Boolean).join('\n'),
+    tip: [s.description, s.url, s.cwd, s.name && `${s.name} · pid ${s.pid}`].filter(Boolean).join('\n'),
   }));
+  // A pane.sh app whose server runs is the server's tile above (same key).
+  const running = new Set(local.map(a => a.key));
+  for (const a of paneApps) {
+    if (running.has(a.key)) continue;
+    const up = servers.some(s => s.key === a.key);   // answers, but with no web page
+    local.push({
+      id: a.key, key: a.key, icon: a.icon, thumb: a.thumb, stopped: true, starting: a.starting,
+      name: a.label || a.name,
+      sub: a.starting ? 'Starting…' : up ? 'No web page' : 'Not running',
+      tip: [a.description, a.dir, `:${a.port}`, !a.starting && !up && 'Click to start it'].filter(Boolean).join('\n'),
+    });
+  }
   const network = netApps.map(a => ({
     id: a.id, key: a.key, icon: a.icon, thumb: a.thumb, offline: a.online === false, file: a.file,
     name: a.label || a.title || a.host,
@@ -378,6 +392,8 @@ api.onNet((list) => { netApps = list; renderHome(); if ($('#discover').open) ren
 api.listNet().then((list) => { netApps = list; renderHome(); });
 api.onPins((list) => { pins = list; renderHome(); });
 api.listPins().then((list) => { pins = list; renderHome(); });
+api.onPaneApps((list) => { paneApps = list; renderHome(); });
+api.listPaneApps().then((list) => { paneApps = list; renderHome(); });
 api.onPermissions((list) => { perms = list; renderHome(); });
 api.listPermissions().then((list) => { perms = list; renderHome(); });
 api.onPasswords((st) => { logins = st; renderHome(); });

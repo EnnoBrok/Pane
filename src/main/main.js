@@ -1,7 +1,9 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Menu, clipboard, screen, nativeTheme, nativeImage, Notification } = require('electron');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
+const { pathToFileURL } = require('node:url');
 const { execFile, spawn } = require('node:child_process');
 const treeKill = require('tree-kill');
 const { listListeners } = require('./scanner');
@@ -17,6 +19,7 @@ const { discover } = require('./discover');
 const { selfInstall } = require('./install');
 const { register } = require('./register');
 const launch = require('./launch');
+const paneapps = require('./paneapps');
 
 const TAB_BAR_HEIGHT = 40;
 const FRAME_HEIGHT = 34;          // title strip of an app opened in its own window
@@ -25,6 +28,7 @@ const REPROBE_MS = 30000;         // confirmed web apps
 const REPROBE_PENDING_MS = 5000;  // everything else, which may still be starting up
 const START_TIMEOUT_MS = 90000;   // a started server that never answers is given up on
 const NET_REPROBE_MS = 15000;     // user-added network apps
+const PANE_SCAN_MS = 60000;       // folders with a pane.sh
 const HOME_BG = { dark: '#16171b', light: '#f5f5f6' };   // --page in style.css
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
@@ -50,8 +54,11 @@ function send(channel, data) {
 // ---------- discovery ----------
 
 function serverId(l) { return `${l.pid || 0}:${l.port}`; }
-// Stable across restarts (pids change); the same key hidden.js uses.
-function serverKey(s) { return `${s.name || ''}:${s.port}`; }
+// Stable across restarts (pids change); the same key hidden.js uses. A server
+// that is a pane.sh app goes by the app's key, so the app is one entry whether
+// it runs or not.
+function plainKey(s) { return `${s.name || ''}:${s.port}`; }
+function serverKey(s) { return s.paneKey || plainKey(s); }
 
 // Full scan while the main window exists. With only app windows open nobody sees
 // the launcher, so then the failed tabs are just retried, without listing ports.
@@ -78,8 +85,10 @@ async function scanOnce() {
     let s = servers.get(id);
     if (!s) {
       s = { id, port: l.port, pid: l.pid, name: l.name, cmdline: l.cmdline, argv: l.argv, cwd: l.cwd, exe: l.exe,
-            host: l.reachHost, kind: null, title: '', url: '', proto: '', icon: '', probedAt: 0 };
+            host: l.reachHost, kind: null, title: '', url: '', proto: '', icon: '', probedAt: 0, paneKey: '' };
       servers.set(id, s);
+      if (matchPane(s)) { pushPins(); pushTabs(); }
+      if (prefs.addServerFolder(paneapps.parentRoot(s.cwd, os.homedir()))) refreshPaneSoon();   // its siblings may have a pane.sh
       changed = true;
     }
     if (now - s.probedAt > (s.kind === 'html' ? REPROBE_MS : REPROBE_PENDING_MS)) {
@@ -89,13 +98,14 @@ async function scanOnce() {
       if (kind !== s.kind || (p && p.title !== s.title)) changed = true;
       s.kind = kind;
       if (p) { s.title = p.title; s.url = p.url; s.proto = p.proto; }
+      if (kind === 'html' && s.paneKey) paneUrls.set(s.paneKey, s.url);
       if (kind === 'html') {
         if (!s.iconTried) {
           s.iconTried = true;
           icons.forPage(p.url, p.body).then((icon) => { if (icon && servers.get(id) === s) { s.icon = icon; refreshPin(s); pushServers(); } });
         }
         refreshPin(s);
-        if (starting.delete(serverKey(s))) { pushPins(); notifyKey(serverKey(s)); recover(serverKey(s), true); }
+        if (starting.delete(serverKey(s))) { pushStarting(); notifyKey(serverKey(s)); recover(serverKey(s), true); }
       }
     }
     if (s.kind === 'html') recover(serverKey(s));   // its tabs that failed while it was down
@@ -110,9 +120,11 @@ function publicServers() {
   return [...servers.values()]
     .filter(s => s.kind && s.kind !== 'none')
     .map((s) => {
-      const { id, port, pid, name, cmdline, cwd, exe, host, kind, title, url, proto, icon } = s;
+      const { id, port, pid, name, cmdline, cwd, exe, host, kind, title, url, proto } = s;
       const key = serverKey(s);
-      return { id, key, port, pid, name, cmdline, cwd, exe, host, kind, title, url, proto, icon,
+      const a = s.paneKey && paneapps.get(s.paneKey);
+      return { id, key, port, pid, name, cmdline, cwd, exe, host, kind, title, url, proto, icon: iconOf(s),
+               appName: a ? a.name : '', description: a ? a.description : '',
                label: prefs.getName(key), hidden: hidden.isHidden(s), thumb: thumbFor(key) };
     });
 }
@@ -134,10 +146,12 @@ function pushNet() { send('net:update', publicNet()); }
 function publicPins() {
   return prefs.listPins().map(p => ({
     key: p.key, local: p.local, title: p.title, label: prefs.getName(p.key), icon: p.icon, url: p.url,
-    thumb: thumbFor(p.key), canStart: p.local && launch.canStart(p.start), starting: starting.has(p.key),
+    thumb: thumbFor(p.key), canStart: p.local && canStart(p.key), starting: starting.has(p.key),
   }));
 }
 function pushPins() { send('pins:update', publicPins()); }
+// A server started or given up on: pinned and pane.sh tiles show "Starting…".
+function pushStarting() { pushPins(); pushPaneApps(); }
 
 function pin(target) {
   const s = target.id && servers.get(target.id);
@@ -149,7 +163,101 @@ function unpin(key) { prefs.setPinned(key, null); pushPins(); }
 // Keeps a pin's title, icon and start command current while its app runs.
 function refreshPin(s) {
   const key = serverKey(s);
-  if (prefs.isPinned(key)) prefs.updatePin(key, { title: s.title, url: s.url, icon: s.icon, start: launch.commandOf(s) });
+  if (prefs.isPinned(key)) prefs.updatePin(key, { title: titleOf(s), url: s.url, icon: iconOf(s), start: launch.commandOf(s) });
+}
+
+// ---------- pane.sh apps ----------
+// Folders with a pane.sh (paneapps.js) show on home even while their server is
+// down (tile id = app key "pane:<folder>"); a click runs the pane.sh. A running
+// server on the app's port (and in its folder) takes the app's key.
+
+const paneIcons = new Map();   // app key -> icon (data URL) from its pane.icon
+const paneUrls = new Map();    // app key -> the page its server last answered with
+const launched = new Map();    // app key -> pid of the server Pane started for it
+let paneScan = null;           // the search in flight
+let paneScannedAt = 0;
+let paneSoon = null;
+
+function iconOf(s) { return (s.paneKey && paneIcons.get(s.paneKey)) || s.icon; }
+function titleOf(s) { const a = s.paneKey && paneapps.get(s.paneKey); return (a && a.name) || s.title; }
+function paneInfo(a) {
+  return { start: launch.scriptCommand(a.file), url: paneUrls.get(a.key) || `http://127.0.0.1:${a.port}/`, title: a.name };
+}
+
+function publicPaneApps() {
+  return paneapps.list().map(a => ({
+    key: a.key, name: a.name, port: a.port, dir: a.dir, description: a.description, icon: paneIcons.get(a.key) || '',
+    label: prefs.getName(a.key), thumb: thumbFor(a.key), starting: starting.has(a.key),
+  }));
+}
+function pushPaneApps() { send('paneapps:update', publicPaneApps()); }
+
+// Where to look: the configured folders (or ~/Dokumente, ~/Projects, ...), and
+// the parents of the folders local servers ran in, so the siblings of an app
+// Pane has seen are found too.
+function paneRoots() {
+  const cwds = [...[...servers.values()].map(s => s.cwd), ...prefs.listPins().map(p => p.start && p.start.cwd)];
+  return paneapps.rootsFor({ home: os.homedir(), folders: prefs.getAppFolders(), parents: prefs.listServerFolders(), cwds });
+}
+
+// One search at a time; a second request joins the running one.
+function refreshPane() {
+  if (!paneapps.supported) return Promise.resolve();
+  if (!paneScan) {
+    paneScannedAt = Date.now();
+    paneScan = paneapps.refresh(paneRoots())
+      .then((changed) => {
+        for (const a of paneapps.list()) {
+          if (!a.iconFile) { paneIcons.delete(a.key); continue; }
+          icons.fetchIcon(pathToFileURL(a.iconFile).href).then((icon) => {
+            if ((icon || '') === (paneIcons.get(a.key) || '')) return;
+            if (icon) paneIcons.set(a.key, icon); else paneIcons.delete(a.key);
+            pushPaneApps(); pushServers();
+          });
+        }
+        const moved = matchAll();
+        if (changed || moved) { pushPaneApps(); pushServers(); pushPins(); pushTabs(); }
+      })
+      .catch((err) => console.warn('Pane: looking for pane.sh apps failed:', err))
+      .finally(() => { paneScan = null; });
+  }
+  return paneScan;
+}
+// A new folder to look in: soon, once, not per server.
+function refreshPaneSoon() {
+  clearTimeout(paneSoon);
+  paneSoon = setTimeout(refreshPane, 1000);
+}
+
+// Ties a server to its pane.sh app (or unties it); its pins, names and tabs follow the key.
+function matchPane(s) {
+  const before = serverKey(s);
+  const a = paneapps.match(s, launched);
+  s.paneKey = a ? a.key : '';
+  const after = serverKey(s);
+  // A first sighting too: what was pinned or named under the process name moves to the app.
+  return rekey(before !== after ? before : plainKey(s), after);
+}
+function matchAll() {
+  let moved = false;
+  for (const s of servers.values()) moved = matchPane(s) || moved;
+  // A pinned app that is down, remembered by process name, from a folder that now has a pane.sh.
+  for (const a of paneapps.list()) {
+    for (const p of [...prefs.listPins()]) {
+      const cwd = p.start && p.start.cwd;
+      if (p.local && p.key !== a.key && p.key.endsWith(`:${a.port}`) && cwd && paneapps.matchApp([a], { port: a.port, cwd })) {
+        moved = rekey(p.key, a.key) || moved;
+      }
+    }
+  }
+  return moved;
+}
+function rekey(from, to) {
+  if (!from || !to || from === to) return false;
+  let moved = prefs.rekey(from, to);
+  for (const t of tabs.values()) if (t.key === from) { t.key = to; moved = true; }
+  if (starting.has(from)) { starting.set(to, starting.get(from)); starting.delete(from); moved = true; }
+  return moved;
 }
 
 // Resolves when something answers on the URL's port.
@@ -166,35 +274,56 @@ function listening(url) {
   });
 }
 
-// Starts an app's server with { start, url, title }: a pin, or what a running
-// server was seen with. Returns false when there is nothing to start.
+// Starts an app's server with { start, url, title }: a pin, a pane.sh app, or
+// what a running server was seen with. Returns false when there is nothing to start.
 async function startServer(key, info) {
   if (starting.has(key) || !launch.canStart(info.start)) return false;
   if (await listening(info.url)) return false;   // already up
   const name = prefs.getName(key) || info.title || key;
   const fail = (detail) => {
     if (!starting.delete(key)) return;
-    pushPins(); notifyKey(key);
+    pushStarting(); notifyKey(key);
     startFailed(key, name, detail);
   };
   let child;
   starting.set(key, Date.now());
   try { child = launch.start(key, info.start); } catch (err) { fail(String(err.message || err)); return false; }
+  if (child.pid) launched.set(key, child.pid);   // a pane.sh that execs its server keeps this pid
   child.once('error', (err) => fail(String(err.message || err)));
   // Exit code 0 can be a server that forked itself into the background.
   child.once('exit', (code, signal) => { if (code !== 0) fail(signal ? `It was ended by ${signal}.` : `It exited with code ${code}.`); });
-  setTimeout(() => { if (starting.delete(key)) { pushPins(); notifyKey(key); } }, START_TIMEOUT_MS);
-  pushPins();
+  setTimeout(() => { if (starting.delete(key)) { pushStarting(); notifyKey(key); } }, START_TIMEOUT_MS);
+  pushStarting();
   notifyKey(key);
   return true;
 }
-function startPinned(key) {
+// Starts the server of an app that is down: through its pane.sh if it has one,
+// else with the command a pin remembers.
+function startApp(key) {
+  const a = paneapps.get(key);
+  if (a) {
+    // Another program on the app's port: starting would only fail, and opening would show that program.
+    const other = [...servers.values()].find(s => s.port === a.port && serverKey(s) !== key);
+    if (other) {
+      dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
+        type: 'error', message: `${prefs.getName(key) || a.name} cannot start`, noLink: true,
+        detail: `Port ${a.port} is in use by ${other.name || 'another program'}${other.pid ? ` (pid ${other.pid})` : ''}${other.cwd ? ` in ${other.cwd}` : ''}.`,
+      });
+      return Promise.resolve(false);
+    }
+    return startServer(key, paneInfo(a));
+  }
   const p = prefs.getPin(key);
   return p && p.local ? startServer(key, p) : Promise.resolve(false);
 }
+function canStart(key) {
+  if (paneapps.get(key)) return true;
+  const p = prefs.getPin(key);
+  return !!(p && p.local && launch.canStart(p.start));
+}
 
 async function startFailed(key, name, detail) {
-  const log = launch.hasLog(key);
+  const log = launch.hasLog(key);   // pane.sh errors land there too
   const { response } = await dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
     type: 'error', message: `${name} did not start`, detail, noLink: true,
     buttons: log ? ['Show output', 'Close'] : ['Close'], defaultId: 0, cancelId: log ? 1 : 0,
@@ -202,10 +331,16 @@ async function startFailed(key, name, detail) {
   if (log && response === 0) shell.openPath(launch.logFile(key));
 }
 
-// Stops a local server and starts it again with the same command.
+// What starts a running server again: its pane.sh, or the command it runs with.
+function startInfo(s) {
+  const a = s.paneKey && paneapps.get(s.paneKey);
+  return a ? paneInfo(a) : { start: launch.commandOf(s), url: s.url, title: s.title || s.name };
+}
+
+// Stops a local server and starts it again with the same command (or its pane.sh).
 function restartServer(s) {
   const key = serverKey(s);
-  const info = { start: launch.commandOf(s), url: s.url, title: s.title || s.name };
+  const info = startInfo(s);
   treeKill(s.pid, 'SIGTERM', async (err) => {
     if (err) { dialog.showMessageBox(win, { type: 'error', message: `Could not stop ${info.title}`, detail: String(err.message || err) }); return; }
     for (let i = 0; i < 40 && await listening(info.url); i++) await new Promise(r => setTimeout(r, 250));
@@ -221,13 +356,21 @@ function resolveTarget(sid) {
       || netapps.list().find(a => a.url === key);
     if (live) return resolveTarget(live.id);
     const p = prefs.getPin(key);
+    if (!p && paneapps.get(key)) return resolveTarget(key);
     return p && { id: null, key, url: p.url, icon: p.icon, label: prefs.getName(key), title: p.title || key, partition: p.partition };
+  }
+  if (String(sid).startsWith('pane:')) {   // a pane.sh app: its server if it runs
+    const live = [...servers.values()].find(x => x.kind === 'html' && serverKey(x) === sid);
+    if (live) return resolveTarget(live.id);
+    const a = paneapps.get(sid);
+    return a && { id: null, key: a.key, url: paneInfo(a).url, icon: paneIcons.get(a.key) || '', label: prefs.getName(a.key),
+                  title: a.name, partition: `persist:app-${a.port}` };
   }
   const s = servers.get(sid);
   if (s) {
     const key = serverKey(s);
-    return { id: s.id, key, url: s.url, icon: s.icon, label: prefs.getName(key),
-             title: s.title || s.name || `:${s.port}`, partition: `persist:app-${s.port}` };
+    return { id: s.id, key, url: s.url, icon: iconOf(s), label: prefs.getName(key),
+             title: titleOf(s) || s.name || `:${s.port}`, partition: `persist:app-${s.port}` };
   }
   const n = netapps.get(sid);
   if (n) {
@@ -304,10 +447,9 @@ function windowTitle(t) {
 }
 
 function publicTab(t) {
-  const p = prefs.getPin(t.key);
   return { id: t.id, key: t.key, title: t.label || t.title, url: t.url, icon: t.icon, theme: t.theme, count: t.count || 0,
            loading: t.loading, failed: t.failed ? t.failed.desc : null,
-           starting: starting.has(t.key), canStart: !!(p && p.local && launch.canStart(p.start)) };
+           starting: starting.has(t.key), canStart: canStart(t.key) };
 }
 function pushTabs() {
   const counts = {};
@@ -368,13 +510,13 @@ function windowClosing() {
   if (open <= 1) freezeSession();
 }
 
-// Local apps come back only if their server runs (or they are pinned); a dev server that is gone stays closed.
+// Local apps come back only if their server runs (or they are pinned, or have a pane.sh); a dev server that is gone stays closed.
 function restoreSession() {
   restored = true;
   const live = new Set([...servers.values()].filter(x => x.kind === 'html').map(serverKey));
   let active = null;
   for (const e of prefs.getSession()) {
-    if (!/^(https?|file):\/\//.test(e.key) && !live.has(e.key) && !prefs.isPinned(e.key)) continue;
+    if (!/^(https?|file):\/\//.test(e.key) && !live.has(e.key) && !prefs.isPinned(e.key) && !paneapps.get(e.key)) continue;
     if ([...tabs.values()].some(t => t.key === e.key)) continue;
     const id = openTab({ id: null, key: e.key, url: e.url, title: e.title, label: prefs.getName(e.key), icon: e.icon, partition: e.partition },
       { window: !!e.window });
@@ -503,7 +645,7 @@ function wire(t) {
     if (z !== wc.getZoomLevel()) wc.setZoomLevel(z);
     notify(t);
   });
-  wc.on('did-finish-load', () => { if (!t.failed && starting.delete(t.key)) { pushPins(); notifyKey(t.key); } });
+  wc.on('did-finish-load', () => { if (!t.failed && starting.delete(t.key)) { pushStarting(); notifyKey(t.key); } });
   wc.on('found-in-page', (_e, r) => {
     const w = windowOf(t);
     if (w && !w.isDestroyed()) w.webContents.send('find:result', { active: r.activeMatchOrdinal, matches: r.matches });
@@ -705,7 +847,7 @@ function openStandalone(id) {
   const e = id && prefs.getStandalone(id);
   if (!e) return false;
   openTab({ id: null, key: e.key, url: e.url, title: e.name, label: prefs.getName(e.key), icon: e.icon, partition: e.partition }, { window: true });
-  startPinned(e.key);   // its server, if it is pinned, local and down
+  startApp(e.key);   // its server, if it is local and down
   return true;
 }
 
@@ -819,6 +961,7 @@ function setLayout(layout) {
   pushServers();   // thumbnails come and go with the Previews layout
   pushNet();
   pushPins();
+  pushPaneApps();
 }
 function publicView() { return { layout: prefs.getLayout(), windowsByDefault: prefs.windowsByDefault() }; }
 function pushView() { send('view:update', publicView()); }
@@ -897,6 +1040,7 @@ function tileMenu(sender, sid) {
   const s = servers.get(target.id);
   const n = netapps.get(target.id);
   const p = prefs.getPin(target.key);
+  const a = paneapps.get(target.key);
   const open = [...tabs.values()].find(t => t.key === target.key);
   const items = [
     opensInWindow(target.key)
@@ -911,7 +1055,7 @@ function tileMenu(sender, sid) {
     { label: 'Copy address', click: () => clipboard.writeText(target.url) },
     { label: 'Open in system browser', click: () => openExternal(target.url) },
   ];
-  const cwd = (s && s.cwd) || (p && p.start && p.start.cwd) || (n && netapps.dirOf(n.url));
+  const cwd = (a && a.dir) || (s && s.cwd) || (p && p.start && p.start.cwd) || (n && netapps.dirOf(n.url));
   if (cwd) items.push({ label: editorCmd ? 'Open folder in VS Code' : 'Open folder', click: () => openFolder(cwd) });
   if (n && netapps.isFile(n.url)) items.push({ label: 'Show in folder', click: () => shell.showItemInFolder(netapps.pathOf(n.url)) });
   items.push(SEP);
@@ -920,13 +1064,14 @@ function tileMenu(sender, sid) {
       const isHidden = hidden.isHidden(s);
       items.push({ label: isHidden ? 'Show on home' : 'Hide', click: () => { if (isHidden) hidden.unhide(s); else hidden.hide(s); pushServers(); } });
     }
-    if (s.pid && launch.commandOf(s)) items.push({ label: 'Restart server', click: () => restartServer(s) });
+    if (s.pid && (s.paneKey || launch.commandOf(s))) items.push({ label: 'Restart server', click: () => restartServer(s) });
     if (s.pid) items.push({ label: 'Stop…', click: () => confirmStop(s) });
   } else if (n) {
     items.push({ label: 'Remove', click: () => removeNet(n.id) });
-  } else if (p && p.local) {
-    items.push({ label: starting.has(p.key) ? 'Starting…' : 'Start server', enabled: launch.canStart(p.start) && !starting.has(p.key),
-                 click: () => startPinned(p.key) });
+  } else if (a || (p && p.local)) {
+    const key = target.key;
+    items.push({ label: starting.has(key) ? 'Starting…' : 'Start server', enabled: canStart(key) && !starting.has(key),
+                 click: () => startApp(key) });
   }
   if (launch.hasLog(target.key)) items.push({ label: 'Show server output', click: () => shell.openPath(launch.logFile(target.key)) });
   if (items[items.length - 1] === SEP) items.pop();
@@ -980,9 +1125,11 @@ ipcMain.handle('servers:list', () => publicServers());
 ipcMain.handle('servers:unhide', (_e, sid) => { const s = servers.get(sid); if (s) { hidden.unhide(s); pushServers(); } });
 ipcMain.handle('net:list', () => publicNet());
 ipcMain.handle('pins:list', () => publicPins());
+ipcMain.handle('paneapps:list', () => publicPaneApps());
 // One search of the local network at a time; a second request joins the running one.
 let discovering = null;
 ipcMain.handle('net:discover', (e) => {
+  refreshPane();   // the user is looking for apps: new pane.sh folders count too
   if (!discovering) {
     const report = (f, text) => { if (!e.sender.isDestroyed()) e.sender.send('net:discover-progress', { f, text }); };
     discovering = discover({ known: netapps.list().map(a => a.url), onProgress: report })
@@ -1002,6 +1149,7 @@ ipcMain.handle('app:rename', (_e, sid, name) => {
   pushServers();
   pushNet();
   pushPins();
+  pushPaneApps();
 });
 ipcMain.handle('tile:menu', (e, sid) => tileMenu(e.sender, sid));
 ipcMain.handle('home:menu', (e) => homeMenu(e.sender));
@@ -1015,10 +1163,10 @@ ipcMain.handle('thumbs:want', (_e, sids) => {
 ipcMain.handle('tab:open', (_e, sid, other) => {
   const t = resolveTarget(sid);
   if (!t) return null;
-  if (!t.id) startPinned(t.key);   // a pinned app whose server is down
+  if (!t.id) startApp(t.key);   // a pinned or pane.sh app whose server is down
   return openTab(t, other ? { window: !opensInWindow(t.key) } : {});
 });
-ipcMain.handle('tab:start', (_e, id) => { const t = tabs.get(id); if (t) startPinned(t.key); });
+ipcMain.handle('tab:start', (_e, id) => { const t = tabs.get(id); if (t) startApp(t.key); });
 ipcMain.handle('tab:activate', (_e, id) => activateTab(id));
 ipcMain.handle('tab:close', (_e, id) => closeTab(id));
 ipcMain.handle('tab:menu', (_e, id) => { const t = tabs.get(id); if (t) tabMenu(t); });
@@ -1236,7 +1384,10 @@ function createWindow() {
     prefs.setBounds('main', { ...w.getNormalBounds(), maximized: w.isMaximized() });
     windowClosing();
   });
-  w.on('focus', () => w.flashFrame(false));
+  w.on('focus', () => {
+    w.flashFrame(false);
+    if (Date.now() - paneScannedAt > 5000) refreshPane();   // a pane.sh written in a terminal shows up on switching back
+  });
   w.on('closed', () => {
     const own = mainTabs();
     win = null;
@@ -1245,7 +1396,7 @@ function createWindow() {
   });
   w.on('app-command', (_e, cmd) => appCommand(tabs.get(activeTab)?.view.webContents, cmd));
   w.webContents.on('before-input-event', (e, input) => { if (handleKey(input, tabs.get(activeTab) || null)) e.preventDefault(); });
-  w.webContents.on('did-finish-load', () => { pushServers(); pushNet(); pushPins(); pushPasswords(); pushPermissions(); pushTabs(); });
+  w.webContents.on('did-finish-load', () => { pushServers(); pushNet(); pushPins(); pushPaneApps(); pushPasswords(); pushPermissions(); pushTabs(); });
   scan();   // the list may be stale after running with app windows only
   scanNet();
 }
@@ -1318,7 +1469,7 @@ if (!app.requestSingleInstanceLock()) {
     passwords.load();
     hidden.load();
     prefs.load();
-    thumbs.onUpdate(() => { if (prefs.getLayout() === 'previews') { pushServers(); pushNet(); pushPins(); } });
+    thumbs.onUpdate(() => { if (prefs.getLayout() === 'previews') { pushServers(); pushNet(); pushPins(); pushPaneApps(); } });
     // Started from a detached app's launcher entry: just that app, no home screen.
     refreshStandalone();
     register(standalone.launchCommand);   // "Open with Pane" for HTML files
@@ -1327,10 +1478,12 @@ if (!app.requestSingleInstanceLock()) {
     openFileArg(process.argv);
     devAids();
     detectEditor();
-    scan().then(() => { if (solo) restored = true; else restoreSession(); });
+    // pane.sh apps first known, so a tab of one that is down is restored too.
+    Promise.all([scan(), refreshPane()]).then(() => { if (solo) restored = true; else restoreSession(); });
     scanNet();
     setInterval(scan, SCAN_INTERVAL_MS);
     setInterval(scanNet, SCAN_INTERVAL_MS);
+    setInterval(refreshPane, PANE_SCAN_MS);
     // Started as the portable exe: install a copy that starts without unpacking, once the window is up.
     setTimeout(() => selfInstall().then((ok) => { if (ok) { refreshStandalone(); register(standalone.launchCommand); } }), 5000);
   });

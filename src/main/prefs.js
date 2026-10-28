@@ -1,6 +1,6 @@
 // UI preferences: custom app names, apps that open in their own window, window
 // positions, the home layout, detached and pinned apps, per-app zoom, the apps
-// open at quit, and site permissions. Written to a temp file and renamed, so a
+// open at quit, site permissions, and where to look for pane.sh apps. Written to a temp file and renamed, so a
 // crash never leaves half a file behind.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -8,7 +8,8 @@ const { app } = require('electron');
 
 const FILE = () => path.join(app.getPath('userData'), 'prefs.json');
 let data = { names: {}, windowed: [], windowsByDefault: false, bounds: {}, layout: 'grid', standalone: {},
-             pins: [], zoom: {}, session: [], permissions: {} };
+             pins: [], zoom: {}, session: [], permissions: {},
+             appFolders: null, serverFolders: [] };
 
 function load() {
   try { data = { ...data, ...JSON.parse(fs.readFileSync(FILE(), 'utf8')) }; } catch { /* first run */ }
@@ -108,9 +109,53 @@ function listPermissions() {
   return Object.entries(data.permissions).flatMap(([origin, o]) => Object.entries(o).map(([permission, allowed]) => ({ origin, permission, allowed })));
 }
 
+// Where pane.sh apps are looked for (paneapps.js). appFolders: a list set by
+// hand in prefs.json, or null for the defaults (~/Dokumente, ~/Projects, ...).
+// serverFolders: parents of the working folders of local servers seen, so an
+// app's siblings are found too; newest first, a few dozen at most.
+const MAX_SERVER_FOLDERS = 40;
+function getAppFolders() { return Array.isArray(data.appFolders) ? data.appFolders.filter(f => typeof f === 'string' && f) : null; }
+function listServerFolders() { return Array.isArray(data.serverFolders) ? data.serverFolders : []; }
+// Returns true when the folder is new.
+function addServerFolder(dir) {
+  if (!dir || listServerFolders().includes(dir)) return false;
+  data.serverFolders = [dir, ...listServerFolders()].filter(d => fs.existsSync(d)).slice(0, MAX_SERVER_FOLDERS);
+  save();
+  return true;
+}
+
+// An app known under another key now (a server found to be a pane.sh app, or
+// one whose pane.sh went away): its name, window, zoom, pin, launcher entry and
+// session entry move along, so home shows one entry for it. What the new key
+// already has wins. Returns true when anything moved.
+function rekey(from, to) {
+  if (!from || !to || from === to) return false;
+  let changed = false;
+  const move = (obj, a, b) => {
+    if (!(a in obj)) return;
+    if (!(b in obj)) obj[b] = obj[a];
+    delete obj[a];
+    changed = true;
+  };
+  move(data.names, from, to);
+  move(data.zoom, from, to);
+  move(data.bounds, `window:${from}`, `window:${to}`);
+  if (data.windowed.includes(from)) { data.windowed = [...new Set(data.windowed.map(k => (k === from ? to : k)))]; changed = true; }
+  const p = getPin(from);
+  if (p) {
+    if (getPin(to)) data.pins = data.pins.filter(x => x !== p); else p.key = to;
+    changed = true;
+  }
+  for (const e of Object.values(data.standalone)) if (e.key === from) { e.key = to; changed = true; }
+  for (const e of getSession()) if (e.key === from) { e.key = to; changed = true; }
+  if (changed) save();
+  return changed;
+}
+
 module.exports = {
   load, getName, setName, isWindowed, setWindowed, windowsByDefault, setWindowsByDefault, getBounds, setBounds,
   getLayout, setLayout, getStandalone, standaloneFor, setStandalone, listStandalone,
   listPins, getPin, isPinned, setPinned, updatePin, getZoom, setZoom, getSession, setSession,
   getPermission, setPermission, listPermissions,
+  getAppFolders, listServerFolders, addServerFolder, rekey,
 };
