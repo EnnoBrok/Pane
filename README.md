@@ -97,7 +97,12 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   `~/.local/share/applications` on Linux, a Start menu shortcut on Windows
   (`src/main/standalone.js`). It starts Pane with `--pane-app=<id>`, which
   opens only that app in its own window; if Pane already runs, the window
-  opens there. On Windows the window also gets its own taskbar identity. The
+  opens there. On Windows the window also gets its own taskbar identity. On
+  Linux under Wayland, where windows have no icon of their own, the window is
+  created with the launcher entry's name as its app id (Electron reads
+  `CHROME_DESKTOP` per window), so GNOME and KDE show the app's icon and name
+  in the dock and overview instead of Pane's; detaching or undetaching an open
+  app recreates its window for that. The
   launcher icon is drawn by `rasterIcon` in `src/renderer/common.js`.
 - A pinned app stays on home while its server is down. For a local one Pane
   remembers the executable, arguments and folder it was last seen running with

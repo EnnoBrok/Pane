@@ -741,13 +741,15 @@ function savedBounds(key, fallback) {
 function attachWindow(t) {
   const dark = t.theme ? t.theme.dark : nativeTheme.shouldUseDarkColors;
   const bounds = savedBounds(`window:${t.key}`, { width: 1100, height: 760 });
-  const w = new BrowserWindow({
+  const desktopId = standaloneDesktopId(t.key);
+  const w = withDesktopId(desktopId, () => new BrowserWindow({
     ...bounds, minWidth: 420, minHeight: 300,
     title: t.label || t.title, backgroundColor: dark ? HOME_BG.dark : HOME_BG.light, icon: ICON,
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: dark ? HOME_BG.dark : HOME_BG.light, symbolColor: dark ? '#e9eaee' : '#1c1d21', height: FRAME_HEIGHT },
     webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false, sandbox: true },
-  });
+  }));
+  w.desktopId = desktopId;
   t.host = w;
   if (bounds.maximized) w.maximize();
   applyStandaloneIdentity(t);
@@ -769,6 +771,39 @@ function attachWindow(t) {
 }
 
 // ---------- standalone apps ----------
+
+// Wayland has no per-window icon: GNOME and KDE show the icon and name of the
+// .desktop file whose name matches the window's app id, and Electron takes that
+// id from CHROME_DESKTOP as each window is created. A detached app's window is
+// created under its own launcher entry's name, so it shows the app's icon and
+// groups apart from Pane (what setAppDetails does on Windows). X11 keeps using setIcon.
+function standaloneDesktopId(key) {
+  if (process.platform !== 'linux') return null;
+  const id = prefs.standaloneFor(key);
+  const e = id && prefs.getStandalone(id);
+  return e && e.file && fs.existsSync(e.file) ? path.basename(e.file) : null;
+}
+// A window keeps the app id it was created with. After an open app is detached
+// or no longer standalone, its window is created again and the page moves over
+// (the new window first: closing the last one would quit Pane).
+function rehost(t) {
+  const old = t.host;
+  if (!old || old.isDestroyed() || process.platform !== 'linux') return;
+  if ((old.desktopId || null) === standaloneDesktopId(t.key)) return;
+  prefs.setBounds(`window:${t.key}`, { ...old.getNormalBounds(), maximized: old.isMaximized() });
+  t.host = null;   // the old window's 'closed' handler leaves the tab alive
+  old.contentView.removeChildView(t.view);
+  attachWindow(t);
+  old.close();
+}
+function withDesktopId(desktopId, make) {
+  if (!desktopId) return make();
+  const before = process.env.CHROME_DESKTOP;
+  process.env.CHROME_DESKTOP = desktopId;
+  try { return make(); } finally {
+    if (before === undefined) delete process.env.CHROME_DESKTOP; else process.env.CHROME_DESKTOP = before;
+  }
+}
 
 // A detached app's window shows its own icon and, on Windows, groups as its own taskbar entry.
 function applyStandaloneIdentity(t) {
@@ -807,7 +842,7 @@ async function detach(target, chrome) {
   if (!prefs.isPinned(target.key)) pin(target);   // a detached app is one of "my apps"
   openTab(target, { window: true });
   const t = [...tabs.values()].find(x => x.key === target.key);
-  if (t) applyStandaloneIdentity(t);
+  if (t) { rehost(t); applyStandaloneIdentity(t); }
   dialog.showMessageBox(t?.host || win, {
     type: 'info', message: `${name} is now a standalone app.`,
     detail: `Start it from your ${process.platform === 'win32' ? 'Start menu' : 'app menu'}; it opens in its own window. Pin it to the taskbar from there.`,
@@ -821,6 +856,8 @@ function undetach(key) {
   if (!e) return;
   standalone.uninstall(id, e.file);
   prefs.setStandalone(id, null);
+  const t = [...tabs.values()].find(x => x.key === key);
+  if (t) rehost(t);   // back under Pane's icon
 }
 
 // Rewrites a launcher entry (new name, or Pane moved). Returns false when it could not.
