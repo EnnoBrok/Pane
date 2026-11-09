@@ -1277,20 +1277,27 @@ function toHex(c) {
 // Who listens behind a URL right now (identity.js, docs/app-identity.md). Read
 // fresh from the system on each call: the server list is not kept current while
 // only app windows are open. null where there is no evidence to be had (Windows),
-// else { local, ev }: ev null when nothing listens, { conflict } for different programs.
+// else { local, ev, port, sockets }: ev null when nothing listens, { conflict } for
+// different programs (or the port changing hands during the check). sockets: the
+// port's listening sockets, so a later step can tell it still talks to the same one.
 async function originEvidence(url) {
   if (!identity.supported) return null;
   let port;
   try { port = identity.portOf(new URL(url)); } catch { return { local: false, ev: null }; }
+  const sockets = identity.listenInodes(port);
   const listeners = (await listListeners()).filter(l => l.port === port && l.pid !== process.pid);
   if (!identity.isLocal(url, listeners)) return { local: false, ev: null };
-  return {
-    local: true, listeners,
-    ev: identity.combine(listeners.map((l) => {
-      const a = paneapps.match(l, launched);
-      return identity.evidenceOf(l, a ? a.key : plainKey(l), launches);
-    })),
-  };
+  const ev = identity.listenInodes(port) !== sockets ? { conflict: true } : identity.combine(listeners.map((l) => {
+    const a = paneapps.match(l, launched);
+    return identity.evidenceOf(l, a ? a.key : plainKey(l), launches);
+  }));
+  return { local: true, listeners, ev, port, sockets };
+}
+// Whether the port behind evidence still has the same listening sockets (true when there is nothing to compare).
+function samePort(who) { return !who || !who.local || identity.listenInodes(who.port) === who.sockets; }
+// Whether a page that asked for something is still the page that asked: not closed, same origin.
+function samePage(wc, origin) {
+  try { return !wc.isDestroyed() && originOf(wc.getURL()) === origin; } catch { return false; }
 }
 // Remembers which program served the pages of a local tab's partition.
 async function notePartitionUse(t) {
@@ -1416,9 +1423,10 @@ ipcMain.on('pw:captured', async (e, { username, password } = {}) => {
   if (!origin || typeof password !== 'string' || !password || typeof username !== 'string') return;
   if (passwords.isNever(origin)) return;
   const who = await originEvidence(origin);
-  const owner = who && who.local && who.ev && !who.ev.conflict ? who.ev : null;
+  // The evidence counts only if the page and the program on the port are still the ones typed into.
+  let owner = who && who.local && who.ev && !who.ev.conflict && senderOrigin(e) === origin && samePort(who) ? who.ev : null;
   // Typed by the user and accepted: from now on it is filled into this program too.
-  if (passwords.matches(origin, username, password)) { passwords.addOwner(origin, username, owner); return; }
+  if (passwords.matches(origin, username, password)) { if (owner) passwords.addOwner(origin, username, owner); return; }
   const update = passwords.forOrigin(origin).some(c => c.username === username);
   const host = new URL(origin).host;
   const parent = (!e.sender.isDestroyed() && BrowserWindow.fromWebContents(e.sender)) || win;
@@ -1428,6 +1436,7 @@ ipcMain.on('pw:captured', async (e, { username, password } = {}) => {
     detail: `Stored ${passwords.backend()}.`,
     buttons: ['Save', 'Not now', 'Never for this site'], defaultId: 0, cancelId: 1, noLink: true,
   });
+  if (owner && !samePort(who)) owner = null;   // changed hands while the dialog was open: saved, but tied to nothing
   if (response === 0) { passwords.set(origin, username, password, owner); pushPasswords(); }
   if (response === 2) passwords.addNever(origin);
 });
@@ -1491,7 +1500,7 @@ function permKeys(permission, details) {
 }
 function originOf(url) { try { return new URL(url).origin; } catch { return ''; } }
 
-const asking = new Map();   // one dialog per origin+request at a time
+const asking = new Map();   // one dialog per tab, origin and request at a time
 async function requestPermission(wc, permission, details) {
   const t = tabFor(wc);
   if (!t) return false;
@@ -1499,20 +1508,25 @@ async function requestPermission(wc, permission, details) {
   if (permission === 'fileSystem') return fileAccess(t, wc, details);
   const keys = permKeys(permission, details);
   if (!keys.some(k => ASK[k])) return true;
+  if (details.isMainFrame === false) return false;   // what is asked for, only the page itself may ask (docs/app-identity.md)
   const origin = originOf(details.requestingUrl || wc.getURL());
   const saved = keys.map(k => prefs.getPermission(origin, k));
   if (saved.includes(false)) return false;
   // On a local origin a saved "Allow" holds for the programs it was given to (docs/app-identity.md).
   const who = await originEvidence(origin).catch(() => null);
+  // Still the page that asked, and still the program the evidence describes.
+  const valid = () => samePage(wc, origin) && samePort(who);
+  if (!valid()) return false;
   const local = who && who.local;
   const ev = local && who.ev && !who.ev.conflict ? who.ev : null;
   if (saved.every(v => v === true) && (!local || keys.every(k => identity.mayFill(prefs.getPermissionOwners(origin, k), who.ev)))) return true;
-  const ref = `${origin} ${keys.join('+')}`;
-  if (!asking.has(ref)) asking.set(ref, ask(t, origin, keys, details, ev).finally(() => asking.delete(ref)));
+  const ref = `${wc.id} ${origin} ${keys.join('+')}`;
+  if (!asking.has(ref)) asking.set(ref, ask(t, origin, keys, details, ev, valid).finally(() => asking.delete(ref)));
   return asking.get(ref);
 }
-// ev: the program on a local origin, to remember an "Allow" for.
-async function ask(t, origin, keys, details, ev = null) {
+// ev: the program on a local origin, to remember an "Allow" for. valid(): whether the
+// page and program are still the ones that asked, checked again once answered.
+async function ask(t, origin, keys, details, ev = null, valid = () => true) {
   const what = keys.length === 2 && keys.includes('camera') ? 'use your camera and microphone' : ASK[keys[0]];
   const { response, checkboxChecked } = await dialog.showMessageBox(windowOf(t), {
     type: 'question', message: `Allow ${t.label || t.title} to ${what}?`,
@@ -1521,7 +1535,7 @@ async function ask(t, origin, keys, details, ev = null) {
     checkboxLabel: 'Remember for this app', checkboxChecked: true,
   });
   const allowed = response === 0;
-  if (quitting) return false;   // closed by quitting: nothing to remember
+  if (quitting || !valid()) return false;   // closed by quitting, or the page or program changed meanwhile: nothing to grant
   if (checkboxChecked) {
     for (const k of keys) {
       prefs.setPermission(origin, k, allowed);
@@ -1538,6 +1552,7 @@ async function ask(t, origin, keys, details, ev = null) {
 const writeGrants = new WeakMap();   // webContents -> Set of "<origin> <path>"
 async function fileAccess(t, wc, details) {
   if (details.fileAccessType !== 'writable') return true;
+  if (details.isMainFrame === false) return false;   // only the page itself may ask to change files
   const file = String(details.filePath || '');
   const origin = originOf(details.requestingUrl || wc.getURL());
   if (!file || !origin) return false;
@@ -1555,8 +1570,9 @@ async function fileAccess(t, wc, details) {
           : `Allow ${name} to save changes to “${path.basename(file)}”?`,
         detail: `${file}\n\nAsked once while this page is open.`,
       });
-      if (response === 0) granted.add(`${origin} ${file}`);
-      return response === 0;
+      if (response !== 0 || quitting || !samePage(wc, origin)) return false;   // not the page that asked any more
+      granted.add(`${origin} ${file}`);
+      return true;
     })().finally(() => asking.delete(ref)));
   }
   return asking.get(ref);

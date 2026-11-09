@@ -73,7 +73,11 @@ one port at the moment of use.
    moved: an existing partition can only get an owner.
 6. Privileged requests from a page are honored only from the main frame,
    and only if the page's origin is still the same after the identity check,
-   which waits on `ss`.
+   which waits on `ss`. That applies to saved logins, asked-for permissions
+   and File System Access writes. An answer from a dialog is used only if,
+   once answered, the tab still shows the same origin and the port still has
+   the same listening sockets. Dialogs are per tab, so one tab's open prompt
+   is never answered for another.
 
 ## Slice 1: saved logins (implemented)
 
