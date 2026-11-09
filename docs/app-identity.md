@@ -1,8 +1,11 @@
 # App identity and native integration
 
-Status: design note, November 2026. Slice 1 (identity levels, saved-login
-protection) and slice 2 (per-app cookie partitions for `pane.sh` apps) are
-implemented. Everything after them is planned or a prototype.
+Status: design note, November 2026. Implemented: slice 1 (identity levels,
+saved-login protection), slice 2 (per-app cookie partitions for `pane.sh`
+apps, guarded on every local port), 2b (remembered permissions tied to the
+program), 2c (a partition per local HTML file), and asking before File
+System Access writes (part of slice 3). The rest of slice 3 and slices 4
+and 5 are planned, some as prototypes.
 
 ## Direction
 
