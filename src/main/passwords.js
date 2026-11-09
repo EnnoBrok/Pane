@@ -3,9 +3,13 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { app, safeStorage } = require('electron');
+const identity = require('./identity');
 
 const FILE = () => path.join(app.getPath('userData'), 'credentials.json');
-let entries = [];   // { id, origin, username, password: 'enc:<base64>' | 'plain:<text>' }
+// { id, origin, username, password: 'enc:<base64>' | 'plain:<text>', owners }
+// owners (local origins only): the processes it was saved with or typed into,
+// [{ key, exe, cwd }] (identity.js); undefined for logins saved before Pane kept them.
+let entries = [];
 let never = [];     // origins the user said never to ask for
 let nextId = 1;
 
@@ -17,7 +21,7 @@ function load() {
   } catch { /* first run */ }
 }
 function save() {
-  const data = { entries: entries.map(({ origin, username, password }) => ({ origin, username, password })), never };
+  const data = { entries: entries.map(({ origin, username, password, owners }) => ({ origin, username, password, owners })), never };
   try { fs.writeFileSync(FILE(), JSON.stringify(data, null, 2), { mode: 0o600 }); } catch { /* ignore */ }
 }
 
@@ -35,22 +39,32 @@ function backend() {
 
 // Entries that no longer decrypt (keyring changed) are skipped rather than filled in empty.
 function forOrigin(origin) {
-  return entries.filter(e => e.origin === origin).map(e => ({ username: e.username, password: dec(e.password) })).filter(c => c.password);
+  return entries.filter(e => e.origin === origin)
+    .map(e => ({ username: e.username, password: dec(e.password), owners: e.owners })).filter(c => c.password);
 }
 function find(origin, username) { return entries.find(e => e.origin === origin && e.username === username); }
 function matches(origin, username, password) {
   const e = find(origin, username);
   return !!e && dec(e.password) === password;
 }
-function set(origin, username, password) {
-  const e = find(origin, username);
+// owner: evidence of the process it was typed into (identity.js), or null for a network origin.
+function set(origin, username, password, owner = null) {
+  let e = find(origin, username);
   if (e) e.password = enc(password);
-  else entries.push({ id: nextId++, origin, username, password: enc(password) });
+  else entries.push(e = { id: nextId++, origin, username, password: enc(password) });
+  if (owner) e.owners = identity.addOwner(e.owners, owner);
   save();
+}
+// The user typed this saved login into another process (or one saved before owners were kept) and it worked.
+function addOwner(origin, username, owner) {
+  const e = find(origin, username);
+  if (!e || !owner) return;
+  const next = identity.addOwner(e.owners, owner);
+  if (next !== e.owners) { e.owners = next; save(); }
 }
 function remove(id) { entries = entries.filter(e => e.id !== id); save(); }
 function isNever(origin) { return never.includes(origin); }
 function addNever(origin) { if (!never.includes(origin)) { never.push(origin); save(); } }
 function list() { return entries.map(({ id, origin, username }) => ({ id, origin, username })); }
 
-module.exports = { load, forOrigin, matches, set, remove, isNever, addNever, list, backend };
+module.exports = { load, forOrigin, matches, set, addOwner, remove, isNever, addNever, list, backend };

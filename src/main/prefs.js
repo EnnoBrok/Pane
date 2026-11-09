@@ -5,11 +5,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { app } = require('electron');
+const identity = require('./identity');
 
 const FILE = () => path.join(app.getPath('userData'), 'prefs.json');
 let data = { names: {}, windowed: [], windowsByDefault: false, bounds: {}, layout: 'grid', standalone: {},
              pins: [], zoom: {}, session: [], permissions: {},
-             appFolders: null, serverFolders: [] };
+             appFolders: null, serverFolders: [], partitionUse: {} };
 
 function load() {
   try { data = { ...data, ...JSON.parse(fs.readFileSync(FILE(), 'utf8')) }; } catch { /* first run */ }
@@ -109,6 +110,19 @@ function listPermissions() {
   return Object.entries(data.permissions).flatMap(([origin, o]) => Object.entries(o).map(([permission, allowed]) => ({ origin, permission, allowed })));
 }
 
+// Which programs have loaded pages in each local partition, most recent first:
+// partition -> [{ key, exe, cwd, since }] (identity.js). Only recorded so far;
+// it is the evidence a later move to per-app partitions relies on (docs/app-identity.md).
+function notePartitionUse(partition, ev) {
+  if (!partition || !ev) return;
+  if (!data.partitionUse || typeof data.partitionUse !== 'object') data.partitionUse = {};
+  const prev = data.partitionUse[partition];
+  const next = identity.addUse(prev, ev);
+  if (next === prev) return;
+  data.partitionUse[partition] = next;
+  save();
+}
+
 // Where pane.sh apps are looked for (paneapps.js). appFolders: a list set by
 // hand in prefs.json, or null for the defaults (~/Dokumente, ~/Projects, ...).
 // serverFolders: parents of the working folders of local servers seen, so an
@@ -157,5 +171,5 @@ module.exports = {
   getLayout, setLayout, getStandalone, standaloneFor, setStandalone, listStandalone,
   listPins, getPin, isPinned, setPinned, updatePin, getZoom, setZoom, getSession, setSession,
   getPermission, setPermission, listPermissions,
-  getAppFolders, listServerFolders, addServerFolder, rekey,
+  getAppFolders, listServerFolders, addServerFolder, rekey, notePartitionUse,
 };

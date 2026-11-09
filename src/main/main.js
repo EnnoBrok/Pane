@@ -20,6 +20,7 @@ const { selfInstall } = require('./install');
 const { register } = require('./register');
 const launch = require('./launch');
 const paneapps = require('./paneapps');
+const identity = require('./identity');
 
 const TAB_BAR_HEIGHT = 40;
 const FRAME_HEIGHT = 34;          // title strip of an app opened in its own window
@@ -174,6 +175,7 @@ function refreshPin(s) {
 const paneIcons = new Map();   // app key -> icon (data URL) from its pane.icon
 const paneUrls = new Map();    // app key -> the page its server last answered with
 const launched = new Map();    // app key -> pid of the server Pane started for it
+const launches = identity.createLaunches();   // the same, with start times, for identity checks
 let paneScan = null;           // the search in flight
 let paneScannedAt = 0;
 let paneSoon = null;
@@ -288,7 +290,8 @@ async function startServer(key, info) {
   let child;
   starting.set(key, Date.now());
   try { child = launch.start(key, info.start); } catch (err) { fail(String(err.message || err)); return false; }
-  if (child.pid) launched.set(key, child.pid);   // a pane.sh that execs its server keeps this pid
+  if (child.pid) { launched.set(key, child.pid); launches.note(key, child.pid); }   // a pane.sh that execs its server keeps this pid
+  child.once('exit', () => launches.forget(child.pid));
   child.once('error', (err) => fail(String(err.message || err)));
   // Exit code 0 can be a server that forked itself into the background.
   child.once('exit', (code, signal) => { if (code !== 0) fail(signal ? `It was ended by ${signal}.` : `It exited with code ${code}.`); });
@@ -647,7 +650,10 @@ function wire(t) {
     if (z !== wc.getZoomLevel()) wc.setZoomLevel(z);
     notify(t);
   });
-  wc.on('did-finish-load', () => { if (!t.failed && starting.delete(t.key)) { pushStarting(); notifyKey(t.key); } });
+  wc.on('did-finish-load', () => {
+    if (!t.failed && starting.delete(t.key)) { pushStarting(); notifyKey(t.key); }
+    if (!t.failed) notePartitionUse(t);
+  });
   wc.on('found-in-page', (_e, r) => {
     const w = windowOf(t);
     if (w && !w.isDestroyed()) w.webContents.send('find:result', { active: r.activeMatchOrdinal, matches: r.matches });
@@ -1261,31 +1267,72 @@ function toHex(c) {
   return '#' + c.match(/\d+/g).map(n => Number(n).toString(16).padStart(2, '0')).join('');
 }
 
+// ---------- identity ----------
+// Who listens behind a URL right now (identity.js, docs/app-identity.md). Read
+// fresh from the system on each call: the server list is not kept current while
+// only app windows are open. null where there is no evidence to be had (Windows),
+// else { local, ev }: ev null when nothing listens, { conflict } for different programs.
+async function originEvidence(url) {
+  if (!identity.supported) return null;
+  let port;
+  try { port = identity.portOf(new URL(url)); } catch { return { local: false, ev: null }; }
+  const listeners = (await listListeners()).filter(l => l.port === port && l.pid !== process.pid);
+  if (!identity.isLocal(url, listeners)) return { local: false, ev: null };
+  return {
+    local: true,
+    ev: identity.combine(listeners.map((l) => {
+      const a = paneapps.match(l, launched);
+      return identity.evidenceOf(l, a ? a.key : plainKey(l), launches);
+    })),
+  };
+}
+// Remembers which program served the pages of a local tab's partition.
+async function notePartitionUse(t) {
+  if (!/^https?:/.test(t.url)) return;
+  const who = await originEvidence(t.url).catch(() => null);
+  if (who && who.local && who.ev && !who.ev.conflict) prefs.notePartitionUse(t.partition, who.ev);
+}
+
 // ---------- passwords ----------
-// The origin always comes from the sender's real URL, never from the page.
+// The origin always comes from the sender's real URL, never from the page, and
+// only the page itself asks (the preload runs in main frames only; checked anyway).
 function senderOrigin(e) {
-  try { const u = new URL(e.sender.getURL()); return /^https?:$/.test(u.protocol) ? u.origin : null; } catch { return null; }
+  try {
+    if (e.sender.isDestroyed() || (e.senderFrame && e.senderFrame !== e.sender.mainFrame)) return null;
+    const u = new URL(e.sender.getURL());
+    return /^https?:$/.test(u.protocol) ? u.origin : null;
+  } catch { return null; }
 }
 function pushPasswords() { send('pw:update', { entries: passwords.list(), backend: passwords.backend() }); }
-ipcMain.handle('pw:get', (e) => {
+// On a local origin only a login saved with (or typed into) the program listening now is filled.
+ipcMain.handle('pw:get', async (e) => {
   const origin = senderOrigin(e);
   if (!origin) return null;
-  const list = passwords.forOrigin(origin);
-  return list.length ? list[0] : null;
+  let list = passwords.forOrigin(origin);
+  if (!list.length) return null;
+  const who = await originEvidence(origin);
+  if (who && who.local) list = list.filter(c => identity.mayFill(c.owners, who.ev));
+  if (!list.length || senderOrigin(e) !== origin) return null;   // the page may have moved on meanwhile
+  return { username: list[0].username, password: list[0].password };
 });
 ipcMain.on('pw:captured', async (e, { username, password } = {}) => {
   const origin = senderOrigin(e);
   if (!origin || typeof password !== 'string' || !password || typeof username !== 'string') return;
-  if (passwords.isNever(origin) || passwords.matches(origin, username, password)) return;
+  if (passwords.isNever(origin)) return;
+  const who = await originEvidence(origin);
+  const owner = who && who.local && who.ev && !who.ev.conflict ? who.ev : null;
+  // Typed by the user and accepted: from now on it is filled into this program too.
+  if (passwords.matches(origin, username, password)) { passwords.addOwner(origin, username, owner); return; }
   const update = passwords.forOrigin(origin).some(c => c.username === username);
   const host = new URL(origin).host;
-  const { response } = await dialog.showMessageBox(BrowserWindow.fromWebContents(e.sender) || win, {
+  const parent = (!e.sender.isDestroyed() && BrowserWindow.fromWebContents(e.sender)) || win;
+  const { response } = await dialog.showMessageBox(parent, {
     type: 'question',
     message: update ? `Update the saved password for ${username || 'this account'} at ${host}?` : `Save the password for ${username || 'this account'} at ${host}?`,
     detail: `Stored ${passwords.backend()}.`,
     buttons: ['Save', 'Not now', 'Never for this site'], defaultId: 0, cancelId: 1, noLink: true,
   });
-  if (response === 0) { passwords.set(origin, username, password); pushPasswords(); }
+  if (response === 0) { passwords.set(origin, username, password, owner); pushPasswords(); }
   if (response === 2) passwords.addNever(origin);
 });
 ipcMain.handle('pw:list', () => ({ entries: passwords.list(), backend: passwords.backend() }));

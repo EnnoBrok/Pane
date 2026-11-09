@@ -171,6 +171,17 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   uses the OS keyring; the main process asks before saving and only ever
   hands a password to the origin it was saved for. Saved logins can be
   forgotten in the Manage dialog.
+- On a local address like `http://127.0.0.1:8770` the origin is whichever
+  program listens on that port right now, so on Linux a saved login also
+  remembers the program it belongs to: executable and working folder, or the
+  `pane.sh` app Pane started (`src/main/identity.js`). It is filled in only
+  while that program (or one the user typed the login into) is the one
+  listening, checked against `ss` and `/proc` at that moment. Logins saved by
+  Pane 0.4.3 or older belong to no program yet: they are filled in again after
+  the next login typed by hand. Network apps and Windows are filled by origin
+  as before. Pane also records which programs used each local cookie
+  partition, for a later move to per-app partitions. Design, levels and
+  what comes next: [docs/app-identity.md](docs/app-identity.md).
 - `src/main/hidden.js` remembers local entries the user hid, keyed by process
   name and port.
 - Notifications: `content-preload.js` replaces the page's `Notification` class,
@@ -233,6 +244,12 @@ comment ends it). The script gets Pane's environment without Electron's
 additions; its output is in the log behind "Show server output".
 
 ## Roadmap
+
+- App identity and native integration, in slices
+  ([docs/app-identity.md](docs/app-identity.md)): per-app cookie partitions,
+  permissions bound to the program, File System Access grants listed in
+  Manage, Web App Manifest file handlers for standalone apps, and a private
+  channel from Pane-started servers to Pane.
 
 - Start pinned local apps on Windows too (needs another process's working
   folder, which Windows does not expose easily).
