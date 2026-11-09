@@ -1521,6 +1521,7 @@ async function ask(t, origin, keys, details, ev = null) {
     checkboxLabel: 'Remember for this app', checkboxChecked: true,
   });
   const allowed = response === 0;
+  if (quitting) return false;   // closed by quitting: nothing to remember
   if (checkboxChecked) {
     for (const k of keys) {
       prefs.setPermission(origin, k, allowed);
@@ -1715,5 +1716,6 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-app.on('before-quit', freezeSession);
+let quitting = false;   // dialogs closed by quitting were not answered by anyone
+app.on('before-quit', () => { quitting = true; freezeSession(); });
 app.on('window-all-closed', () => app.quit());
