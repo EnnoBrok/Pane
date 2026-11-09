@@ -66,8 +66,8 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   backend with no frontend. Ports are rescanned every 2 s; confirmed web apps
   are re-probed every 30 s, everything else every 5 s so a server that is still
   starting up gets promoted once it answers properly.
-- `src/main/main.js` owns the windows, one `WebContentsView` per app (partition
-  `persist:app-<port>`, sandboxed), the native menus and the keyboard shortcuts.
+- `src/main/main.js` owns the windows, one sandboxed `WebContentsView` per app
+  (cookie partitions: see below), the native menus and the keyboard shortcuts.
   An app lives either as a tab in the main window or in its own window
   (`src/renderer/frame.html`: a slim title strip in the app's color). A view is
   moved between the two, so the page keeps its state.
@@ -188,10 +188,12 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   app whose own process Pane sees on its port (Pane started it, or it runs in
   the app's folder) now owns a partition: the port's existing one if nothing
   shows another program used it, otherwise a new one (`src/main/partitions.js`).
-  Nothing is copied or moved, so Pane 0.4.3 still finds the data. Requests to
-  the app's port leave its partition only while the app's own process is
-  listening there; otherwise the tab says another program is answering on its
-  port. Other local servers share the port's partition as before.
+  Nothing is copied or moved, so Pane 0.4.3 still finds the data. Cookies
+  ignore ports, so requests (and WebSocket handshakes) from that partition to
+  any port on this machine go out only while the app's own process listens
+  there; otherwise they are refused and the tab says another program is
+  answering on its port. Other local servers share the port's partition as
+  before.
 - `src/main/hidden.js` remembers local entries the user hid, keyed by process
   name and port.
 - Notifications: `content-preload.js` replaces the page's `Notification` class,
@@ -205,7 +207,8 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   given to, like a saved login: another program on that port is asked again.
   Files and folders a page opens through the File System Access API
   (`showOpenFilePicker` and the like) can be read once picked; changing one
-  asks first, once per page and file or folder.
+  asks first, once per tab, page and file or folder. Permission requests from
+  iframes are refused.
   Notifications, fullscreen and the like are granted.
 - While only app windows are open (no launcher), Pane does not scan ports; it
   just retries apps whose page failed.
@@ -262,9 +265,9 @@ additions; its output is in the log behind "Show server output".
 
 - App identity and native integration, in slices
   ([docs/app-identity.md](docs/app-identity.md)): File System Access grants
-  listed in Manage, Web App Manifest file handlers for standalone apps, and a
-  private channel from Pane-started servers to Pane.
-
+  listed in Manage and, as a prototype, kept across restarts; no long-lived
+  grants for plain-http network apps; Web App Manifest file handlers for
+  standalone apps; and a private channel from Pane-started servers to Pane.
 - Start pinned local apps on Windows too (needs another process's working
   folder, which Windows does not expose easily).
 - Reorder pinned apps by dragging.

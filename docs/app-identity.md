@@ -26,10 +26,11 @@ Pane adds only what the standards leave to the host.
 ## The problem: a local origin is not an identity
 
 `http://127.0.0.1:8770` is whichever process listens on 8770 at that moment.
-Cookies (`persist:app-<port>`), saved logins and site permissions are keyed by
-port or origin, so a different program that later takes the port inherits all
-of them. Local HTML files have the same problem in a different form: they all
-share the `file://` origin and the `persist:files` partition.
+Up to Pane 0.4.3, cookies (`persist:app-<port>`), saved logins and site
+permissions were keyed by port or origin, so a different program that later
+took the port inherited all of them. Local HTML files had the same problem in
+a different form: they all share the `file://` origin, and they shared the
+`persist:files` partition.
 
 ## Identity levels
 
@@ -108,10 +109,7 @@ one port at the moment of use.
   moves to another folder. That costs one manual login.
 - Pane records which identities have loaded pages in each local partition
   (`partitionUse` in `prefs.json`, at most eight per partition). This is the
-  durable evidence the partition migration below depends on. It does not
-  change any partition yet.
-
-## Later slices
+  durable evidence slice 2 decides partition ownership from.
 
 ## Slice 2: per-app partitions (implemented)
 
@@ -139,20 +137,21 @@ app, known by its folder, can *own* a partition, recorded in `appPartitions` in
    need a key that includes the folder.
 6. An app that owns a partition always opens in it, whoever is on the port.
    The partition is *guarded*: a request (HTTP or a WebSocket handshake) to
-   any port on this machine goes out
-   (with the app's cookies) only after a fresh check shows the app's own
-   process listening there, whether Pane started it from the app's `pane.sh` or
-   it runs in the app's folder. That means every port, not just the app's own:
-   cookies are scoped to a host, not a port, so a cookie set by
-   `127.0.0.1:8770` also goes to `127.0.0.1:8771`. The app's own API server on
-   a second port passes; any other program is refused. Navigations are always checked. Other requests reuse
-   a result for up to 5 s, but only while the port's listening sockets (their
+   any port on this machine goes out, with the app's cookies, only after a
+   fresh check shows the app's own process listening there, whether Pane
+   started it from the app's `pane.sh` or it runs in the app's folder. That
+   means every port, not just the app's own: cookies are scoped to a host,
+   not a port, so a cookie set by `127.0.0.1:8770` also goes to
+   `127.0.0.1:8771`. The app's own API server on a second port passes; any
+   other program is refused, and the tab says another program is answering
+   on its port. Navigations are always checked. Other requests reuse a
+   result for up to 5 s, but only while the port's listening sockets (their
    inodes in `/proc/net/tcp` and `tcp6`) are the same ones. A program that
    takes the port over has to open a new socket, so it is always checked
-   anew. When a process Pane started exits, all results are dropped. Otherwise the request is refused and the tab says another
-   program is answering on its port. Without this, a tab restored while
-   another program held the port would load that program's page, either in the
-   app's partition or in the shared one, and leave its cookies there.
+   anew. When a process Pane started exits, all results are dropped.
+   Without the guard, a tab restored while another program held the port
+   would load that program's page, either in the app's partition or in the
+   shared one, and leave its cookies there.
 
 `partitionFor()` in `main.js` makes the decision for every tab and thumbnail.
 Partitions remembered in pins, the reopen list and launcher entries are only
@@ -167,13 +166,12 @@ upgrading again finds them intact.
 Known limits: an app whose server is not visible to Pane (Docker, another
 user's process) never shows its own process, so it never claims a partition
 and stays shared. The same goes for a second server of an app that owns a
-partition: if Pane can't see it as the app's own, its requests are refused. If an app that owns a partition later runs that way, it is
-refused until it runs as its own process again. What remains is the moment
+partition: if Pane can't see it as the app's own, its requests are refused.
+If an app that owns a partition later runs that way, it is refused until it
+runs as its own process again. What remains is the moment
 between the check and Chromium's connection, and a listening socket handed
 to another program (inherited across `exec` or passed over a Unix socket),
 which looks like the same socket.
-
-## Later slices
 
 ## Slice 2b: saved permissions (implemented)
 
@@ -201,14 +199,14 @@ partition. Pages a file opens by link stay in its partition. Pane 0.4.3 puts
 every file back into `persist:files`: the new partitions' data is then out of
 reach, but nothing leaks.
 
-### 2d. Rest of the identity work
+## Slice 2d: rest of the identity work (planned)
 
 - High-value or long-lived grants are refused for plain-http network origins
   and for hosts whose certificate Pane accepted despite errors.
 - Optionally, ask the user when a partition with data has an unclear history,
   instead of keeping it shared.
 
-### 3. File System Access done right
+## Slice 3: File System Access done right (partly implemented)
 
 - Done: write access is asked for, once per tab, page origin and file or
   folder (a folder covers what is inside), and not remembered beyond that.
@@ -221,7 +219,7 @@ reach, but nothing leaks.
 - Reveal in folder and open with default app for a granted handle, using the
   path Electron reports in the permission request.
 
-### 4. Web App Manifest
+## Slice 4: Web App Manifest (planned)
 
 - `file_handlers` → `MimeType=` in a standalone app's `.desktop` entry (with a
   shared-mime-info package for app-specific extensions), and a ProgID per
@@ -234,7 +232,7 @@ reach, but nothing leaks.
   `action` URL with the path, which local apps can use because their server
   can read it.
 
-### 5. Server channel (`PANE_SOCKET`)
+## Slice 5: server channel (`PANE_SOCKET`, planned)
 
 For processes Pane starts from a `pane.sh` only:
 
