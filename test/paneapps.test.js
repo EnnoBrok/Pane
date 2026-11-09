@@ -22,30 +22,30 @@ test('parseHeader reads pane.* lines of the leading comment block only', () => {
   const meta = paneapps.parseHeader([
     '#!/usr/bin/env bash',
     '',
-    '# Builds manufacturing jobs.',
-    '#   pane.name:  MFG Builder  ',
+    '# Sorts photos by date.',
+    '#   pane.name:  Photo Sorter  ',
     '# pane.port: 8770',
     '# PANE.Icon: ui/favicon.svg',
     '# pane.name: second one is ignored',
     'set -e',
     '# pane.description: after code, ignored',
   ].join('\r\n'));
-  assert.deepEqual(meta, { name: 'MFG Builder', port: '8770', icon: 'ui/favicon.svg' });
+  assert.deepEqual(meta, { name: 'Photo Sorter', port: '8770', icon: 'ui/favicon.svg' });
   assert.deepEqual(paneapps.parseHeader('exec foo\n# pane.name: x'), {});
   assert.deepEqual(paneapps.parseHeader(''), {});
 });
 
 test('appFrom needs a name and a valid port; the icon stays inside the folder', () => {
-  const f = '/home/u/apps/mfg/pane.sh';
+  const f = '/home/u/apps/photos/pane.sh';
   assert.match(paneapps.appFrom(f, { port: '1' }).error, /pane\.name/);
   assert.match(paneapps.appFrom(f, { name: 'A' }).error, /pane\.port/);
   assert.match(paneapps.appFrom(f, { name: 'A', port: '70000' }).error, /not a port/);
   assert.match(paneapps.appFrom(f, { name: 'A', port: '80a' }).error, /not a port/);
   const { app } = paneapps.appFrom(f, { name: 'A', port: '8770', icon: 'ui/favicon.svg', description: 'd' });
-  assert.equal(app.key, 'pane:/home/u/apps/mfg');
-  assert.equal(app.dir, '/home/u/apps/mfg');
+  assert.equal(app.key, 'pane:/home/u/apps/photos');
+  assert.equal(app.dir, '/home/u/apps/photos');
   assert.equal(app.port, 8770);
-  assert.equal(app.iconFile, '/home/u/apps/mfg/ui/favicon.svg');
+  assert.equal(app.iconFile, '/home/u/apps/photos/ui/favicon.svg');
   assert.equal(app.description, 'd');
   assert.equal(paneapps.appFrom(f, { name: 'A', port: '1', icon: '../../etc/x.png' }).app.iconFile, '');
   assert.equal(paneapps.appFrom(f, { name: 'A', port: '1', icon: '/etc/x.png' }).app.iconFile, '');

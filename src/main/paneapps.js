@@ -3,10 +3,10 @@
 // foreground; its leading comment lines name the app and its port:
 //
 //   #!/usr/bin/env bash
-//   # pane.name: MFG Builder
+//   # pane.name: Photo Sorter
 //   # pane.port: 8770
 //   # pane.icon: ui/favicon.svg
-//   # pane.description: Builds manufacturing jobs
+//   # pane.description: Sorts photos by date
 //   exec ./venv/bin/python -u server.py
 //
 // So an app that never ran on this machine still shows on home and starts with

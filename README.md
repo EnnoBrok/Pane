@@ -239,10 +239,10 @@ required, the rest is optional:
 
 ```sh
 #!/usr/bin/env bash
-# pane.name: MFG Builder
+# pane.name: Photo Sorter
 # pane.port: 8770
 # pane.icon: ui/favicon.svg
-# pane.description: Builds manufacturing jobs from CAD parts
+# pane.description: Sorts photos into folders by date
 set -e
 exec ./venv/bin/python -u server.py --port 8770
 ```

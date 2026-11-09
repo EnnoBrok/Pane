@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const id = require('../src/main/identity');
 
-const APP = { key: 'pane:/h/mfg', exe: '/usr/bin/python3.13', cwd: '/h/mfg' };
+const APP = { key: 'pane:/h/photos', exe: '/usr/bin/python3.13', cwd: '/h/photos' };
 const OTHER = { key: 'pane:/h/other', exe: '/usr/bin/python3.13', cwd: '/h/other' };
 const ROOT = { key: 'docker-proxy:8080', exe: '', cwd: '' };   // another user's process: /proc unreadable
 const ev = (rec, launchedKey = '') => ({ ...rec, launchedKey });
