@@ -179,9 +179,17 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   listening, checked against `ss` and `/proc` at that moment. Logins saved by
   Pane 0.4.3 or older belong to no program yet: they are filled in again after
   the next login typed by hand. Network apps and Windows are filled by origin
-  as before. Pane also records which programs used each local cookie
-  partition, for a later move to per-app partitions. Design, levels and
-  what comes next: [docs/app-identity.md](docs/app-identity.md).
+  as before. Design, levels and what comes next:
+  [docs/app-identity.md](docs/app-identity.md).
+- Local apps used to share one cookie partition per port, so a different
+  program on that port later saw the cookies of the one before. A `pane.sh`
+  app whose own process Pane sees on its port (Pane started it, or it runs in
+  the app's folder) now owns a partition: the port's existing one if nothing
+  shows another program used it, otherwise a new one (`src/main/partitions.js`).
+  Nothing is copied or moved, so Pane 0.4.3 still finds the data. Requests to
+  the app's port leave its partition only while the app's own process is
+  listening there; otherwise the tab says another program is answering on its
+  port. Other local servers share the port's partition as before.
 - `src/main/hidden.js` remembers local entries the user hid, keyed by process
   name and port.
 - Notifications: `content-preload.js` replaces the page's `Notification` class,
@@ -246,8 +254,8 @@ additions; its output is in the log behind "Show server output".
 ## Roadmap
 
 - App identity and native integration, in slices
-  ([docs/app-identity.md](docs/app-identity.md)): per-app cookie partitions,
-  permissions bound to the program, File System Access grants listed in
+  ([docs/app-identity.md](docs/app-identity.md)): permissions bound to the
+  program, a partition per local HTML file, File System Access grants listed in
   Manage, Web App Manifest file handlers for standalone apps, and a private
   channel from Pane-started servers to Pane.
 

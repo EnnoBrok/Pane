@@ -1,7 +1,8 @@
 # App identity and native integration
 
 Status: design note, November 2026. Slice 1 (identity levels, saved-login
-protection) is implemented; everything after it is planned or a prototype.
+protection) and slice 2 (per-app cookie partitions for `pane.sh` apps) are
+implemented. Everything after them is planned or a prototype.
 
 ## Direction
 
@@ -68,7 +69,8 @@ one port at the moment of use.
 4. When nobody listens on the port, nothing is filled or granted.
 5. If ownership of existing data cannot be shown from durable records, the
    data stays where it is (legacy key) or the user is asked. Data is never
-   given to the first identity Pane happens to see.
+   given to the first identity Pane happens to see. Nothing is ever copied or
+   moved: an existing partition can only get an owner.
 6. Privileged requests from a page are honored only from the main frame,
    and only if the page's origin is still the same after the identity check,
    which waits on `ss`.
@@ -101,22 +103,66 @@ one port at the moment of use.
 
 ## Later slices
 
-### 2. Identity-keyed partitions
+## Slice 2: per-app partitions (implemented)
 
-- New `pane.sh` apps get a partition of their own (`persist:pane-<hash of
-  folder>`). An app counts as new when its port partition has no data on disk
-  and no recorded use.
-- An existing `persist:app-<port>` moves to a `pane.sh` app only if its
-  recorded use shows exactly that app's folder, and a standalone or session
-  entry in prefs links the folder to the port. If the evidence is unclear,
-  the legacy partition stays, or the user is asked.
-- Write tests for collisions before moving any data: two apps on one port,
-  one app that changed ports, use recorded both before and after the move.
+A partition name is only a label, so nothing is copied or moved. A `pane.sh`
+app, known by its folder, can *own* a partition, recorded in `appPartitions` in
+`prefs.json` and never changed after that. The rules are in
+`src/main/partitions.js` (`decide`), and the tests are in
+`test/partitions.test.js`:
+
+1. The port's old partition `persist:app-<port>` has no data on disk and no
+   recorded use: the first `pane.sh` app whose own process is on the port
+   (Pane started it, or it works in the app's folder) claims it.
+2. It has data: it is claimed only if every durable record names this app.
+   Those records are `partitionUse` entries with a known folder inside the
+   app's folder, and pins, reopen-list and launcher entries pointing to that
+   partition. A record with the app's key but no folder came from a match by
+   port alone and counts as somebody else.
+3. Anything unclear, or an app matched by port only: nothing is claimed, and
+   the app keeps sharing the port's partition as before.
+4. Another app already owns the port's partition: the app gets a fresh one,
+   `persist:id-<hash of key>`.
+5. Plain servers (`python3:8770`) keep the port's partition until a `pane.sh`
+   app owns it, and then share `persist:app-<port>-shared`. A process name and
+   port is not an identity. Per-identity partitions for plain servers would
+   need a key that includes the folder.
+6. An app that owns a partition always opens in it, whoever is on the port.
+   The partition is *guarded*: a request to the app's port goes out (with the
+   app's cookies) only after a fresh check shows the app's own process
+   listening there. The result is reused for 2 s, so a page's requests share
+   one check. Otherwise the request is refused and the tab says another
+   program is answering on its port. Without this, a tab restored while
+   another program held the port would load that program's page, either in the
+   app's partition or in the shared one, and leave its cookies there.
+
+`partitionFor()` in `main.js` makes the decision for every tab and thumbnail.
+Partitions remembered in pins, the reopen list and launcher entries are only
+hints. Links opened from a tab inherit its partition, and with it its guard.
+
+Rollback: an app that claims its port's old partition keeps using the same
+name, so Pane 0.4.3 still finds the owner's data there. An app with a fresh
+partition goes back to the port's shared one under 0.4.3, which is the old
+behavior. 0.4.3 keeps the new `prefs.json` fields without reading them, so
+upgrading again finds them intact.
+
+Known limits: an app whose server is not visible to Pane (Docker, another
+user's process) never shows its own process, so it never claims a partition
+and stays shared. If an app that owns a partition later runs that way, it is
+refused until it runs as its own process again. The 2 s reuse leaves a 2 s
+window after a port changes hands.
+
+## Later slices
+
+### 2b. Rest of the identity work
+
 - Saved site permissions need the same owner binding as logins.
 - Local HTML files get one partition per file (or per folder) instead of the
   shared `persist:files`.
 - High-value or long-lived grants are refused for plain-http network origins
   and for hosts whose certificate Pane accepted despite errors.
+- Optionally, ask the user when a partition with data has an unclear history,
+  instead of keeping it shared.
 
 ### 3. File System Access done right
 

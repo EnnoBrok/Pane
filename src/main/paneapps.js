@@ -173,6 +173,6 @@ function get(key) { return apps.get(key) || null; }
 function match(server, launched) { return matchApp(list(), server, launched); }
 
 module.exports = {
-  supported, FILE_NAME, parseHeader, appFrom, findFiles, parentRoot, rootsFor, matchApp,
+  supported, FILE_NAME, inside, parseHeader, appFrom, findFiles, parentRoot, rootsFor, matchApp,
   refresh, list, get, match,
 };

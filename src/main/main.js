@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Menu, clipboard, screen, nativeTheme, nativeImage, Notification } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, shell, dialog, Menu, clipboard, screen, nativeTheme, nativeImage, Notification, session } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -21,6 +21,7 @@ const { register } = require('./register');
 const launch = require('./launch');
 const paneapps = require('./paneapps');
 const identity = require('./identity');
+const partitions = require('./partitions');
 
 const TAB_BAR_HEIGHT = 40;
 const FRAME_HEIGHT = 34;          // title strip of an app opened in its own window
@@ -452,7 +453,7 @@ function windowTitle(t) {
 function publicTab(t) {
   return { id: t.id, key: t.key, title: t.label || t.title, url: t.url, icon: t.icon, theme: t.theme, count: t.count || 0,
            loading: t.loading, failed: t.failed ? t.failed.desc : null,
-           starting: starting.has(t.key), canStart: canStart(t.key) };
+           starting: starting.has(t.key), canStart: canStart(t.key) && !(t.failed && t.failed.blocked) };
 }
 function pushTabs() {
   const counts = {};
@@ -582,6 +583,7 @@ function openTab(target, opts = {}) {
     else reveal(existing);
     return existing.id;
   }
+  target = { ...target, partition: partitionFor(target) };
   const view = new WebContentsView({
     webPreferences: {
       partition: target.partition,   // own cookies per app
@@ -661,7 +663,9 @@ function wire(t) {
   wc.on('did-navigate-in-page', (_e, url) => { t.url = url; notify(t); });
   wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     if (!isMainFrame || code === -3) return;   // -3: aborted by a newer navigation
-    t.failed = { url: url || t.url, desc: desc.replace(/^ERR_/, '').toLowerCase().replace(/_/g, ' '), at: Date.now() };
+    const blocked = code === -20 && blockedPort(url);   // the partition guard said no: not down, someone else is there
+    const why = blocked ? 'another program is answering on its port' : desc.replace(/^ERR_/, '').toLowerCase().replace(/_/g, ' ');
+    t.failed = { url: url || t.url, desc: why, at: Date.now(), blocked };
     t.loading = false;
     relayout(t);
     notify(t);
@@ -1202,7 +1206,7 @@ ipcMain.handle('view:get', () => publicView());
 ipcMain.handle('view:layout', (_e, layout) => setLayout(layout));
 ipcMain.handle('thumbs:want', (_e, sids) => {
   if (!Array.isArray(sids)) return;
-  thumbs.request(sids.slice(0, 50).map(resolveTarget).filter(Boolean));
+  thumbs.request(sids.slice(0, 50).map(resolveTarget).filter(Boolean).map(t => ({ ...t, partition: partitionFor(t) })));
 });
 // other: Ctrl/middle click, which opens the app the other way than it normally would.
 ipcMain.handle('tab:open', (_e, sid, other) => {
@@ -1291,6 +1295,74 @@ async function notePartitionUse(t) {
   if (!/^https?:/.test(t.url)) return;
   const who = await originEvidence(t.url).catch(() => null);
   if (who && who.local && who.ev && !who.ev.conflict) prefs.notePartitionUse(t.partition, who.ev);
+}
+
+// ---------- partitions ----------
+// Which cookie partition a tab of a local app opens in (partitions.js). Decided
+// here for every tab and thumbnail, whatever a pin, the reopen list or a
+// launcher entry remembers. A partition owned by a pane.sh app is also guarded:
+// requests to the app's port go out (with its cookies) only while the app's own
+// process is the one listening there.
+function appDirs(key) {
+  const a = paneapps.get(key);
+  return [...new Set([a && a.dir, a && a.realDir, key.startsWith('pane:') && key.slice(5)].filter(Boolean))];
+}
+// The app's own process: started by Pane for it, or working in its folder.
+function isAppProcess(key, pid, cwd) {
+  return (!!pid && launches.keyOf(pid) === key) || (!!cwd && appDirs(key).some(d => paneapps.inside(cwd, d)));
+}
+function partitionFor(target) {
+  const key = String(target.key || '');
+  if (/^(https?|file):/.test(key) || key.startsWith('link:')) return target.partition;   // network apps, files, links: as given
+  const a = paneapps.get(key);
+  let port = a ? a.port : 0;
+  if (!port) { try { port = identity.portOf(new URL(target.url)); } catch { return target.partition; } }
+  const owned = prefs.ownedPartitions();
+  const onPort = [...servers.values()].filter(x => x.port === port);
+  const mine = onPort.find(x => serverKey(x) === key);
+  const server = !onPort.length ? 'none' : mine && isAppProcess(key, mine.pid, mine.cwd) ? 'verified' : 'unverified';
+  const userData = app.getPath('userData');
+  const d = partitions.decide({ key, port, dirs: appDirs(key), server }, {
+    owned, uses: prefs.partitionUses(), refs: prefs.partitionRefs(),
+    hasData: (p) => fs.existsSync(path.join(userData, 'Partitions', partitions.dirName(p))),
+  });
+  if (d.claim) prefs.setOwnedPartition(key, d.partition, port);
+  if (partitions.ownerOf(d.partition, prefs.ownedPartitions())) guardPartition(d.partition);
+  return d.partition;
+}
+
+const guarded = new Set();
+const verdicts = new Map();   // port -> { key, at, ok: Promise<boolean> }, for a moment, so a page's requests share one check
+const blocked = new Map();    // port -> when a request to it was last refused
+const VERDICT_MS = 2000;
+function guardPartition(partition) {
+  if (guarded.has(partition)) return;
+  guarded.add(partition);
+  session.fromPartition(partition).webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
+    const key = partitions.ownerOf(partition, prefs.ownedPartitions());
+    const a = key && paneapps.get(key);
+    const port = a ? a.port : (prefs.ownedPartitions()[key] || {}).port;
+    let u;
+    try { u = new URL(details.url); } catch { callback({}); return; }
+    if (!key || !port || identity.portOf(u) !== port || !identity.isLocal(details.url)) { callback({}); return; }
+    servedBy(key, port).then((ok) => {
+      if (!ok) blocked.set(port, Date.now());
+      callback({ cancel: !ok });
+    }, () => callback({ cancel: true }));
+  });
+}
+function servedBy(key, port) {
+  const v = verdicts.get(port);
+  if (v && v.key === key && Date.now() - v.at < VERDICT_MS) return v.ok;
+  const ok = originEvidence(`http://127.0.0.1:${port}/`).then((who) => {
+    const ev = who && who.ev;
+    return !!ev && !ev.conflict && (ev.launchedKey === key || isAppProcess(key, 0, ev.cwd));
+  });
+  verdicts.set(port, { key, at: Date.now(), ok });
+  return ok;
+}
+function blockedPort(url) {
+  try { const at = blocked.get(identity.portOf(new URL(url))); return !!at && Date.now() - at < 5000; } catch { return false; }
 }
 
 // ---------- passwords ----------

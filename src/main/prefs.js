@@ -10,7 +10,7 @@ const identity = require('./identity');
 const FILE = () => path.join(app.getPath('userData'), 'prefs.json');
 let data = { names: {}, windowed: [], windowsByDefault: false, bounds: {}, layout: 'grid', standalone: {},
              pins: [], zoom: {}, session: [], permissions: {},
-             appFolders: null, serverFolders: [], partitionUse: {} };
+             appFolders: null, serverFolders: [], partitionUse: {}, appPartitions: {} };
 
 function load() {
   try { data = { ...data, ...JSON.parse(fs.readFileSync(FILE(), 'utf8')) }; } catch { /* first run */ }
@@ -123,6 +123,21 @@ function notePartitionUse(partition, ev) {
   save();
 }
 
+// Partitions owned by pane.sh apps: key -> { partition, port } (partitions.js).
+// Never changed once set; Pane 0.4.3 ignores the field and keeps it.
+function ownedPartitions() { return data.appPartitions && typeof data.appPartitions === 'object' ? data.appPartitions : {}; }
+function setOwnedPartition(key, partition, port) {
+  if (ownedPartitions()[key]) return;
+  data.appPartitions = { ...ownedPartitions(), [key]: { partition, port } };
+  save();
+}
+// Every partition a pin, the reopen list or a launcher entry remembers, with the app it was for.
+function partitionRefs() {
+  return [...data.pins, ...getSession(), ...Object.values(data.standalone)]
+    .filter(e => e && e.key && e.partition).map(e => ({ key: e.key, partition: e.partition }));
+}
+function partitionUses() { return data.partitionUse && typeof data.partitionUse === 'object' ? data.partitionUse : {}; }
+
 // Where pane.sh apps are looked for (paneapps.js). appFolders: a list set by
 // hand in prefs.json, or null for the defaults (~/Dokumente, ~/Projects, ...).
 // serverFolders: parents of the working folders of local servers seen, so an
@@ -172,4 +187,5 @@ module.exports = {
   listPins, getPin, isPinned, setPinned, updatePin, getZoom, setZoom, getSession, setSession,
   getPermission, setPermission, listPermissions,
   getAppFolders, listServerFolders, addServerFolder, rekey, notePartitionUse,
+  ownedPartitions, setOwnedPartition, partitionRefs, partitionUses,
 };
