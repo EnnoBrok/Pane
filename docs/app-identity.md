@@ -159,9 +159,20 @@ which looks like the same socket.
 
 ## Later slices
 
-### 2b. Rest of the identity work
+## Slice 2b: saved permissions (implemented)
 
-- Saved site permissions need the same owner binding as logins.
+A saved "Allow" (camera, microphone, location, screen recording, clipboard
+reading, MIDI, idle detection, opening other programs) on a local origin
+holds only for the programs it was given to. Pane checks that with
+`identity.mayFill`, the same rule logins use. Another program on the port,
+or an allow saved before owners were kept, is asked again, and an "Allow"
+with "Remember" adds that program. The owners are in `permissionOwners` in
+`prefs.json`, next to the plain true/false values that Pane 0.4.3 keeps
+reading. A saved "Block" still holds for the whole origin: refusing a new
+program is the safe direction, and the Manage dialog undoes it.
+
+### 2c. Rest of the identity work
+
 - Local HTML files get one partition per file (or per folder) instead of the
   shared `persist:files`.
 - High-value or long-lived grants are refused for plain-http network origins

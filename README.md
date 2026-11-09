@@ -198,7 +198,9 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   "(3) Inbox", becomes a badge on the tab, the home icon and (Windows) the
   taskbar button.
 - Permissions: camera, microphone, location, screen recording and clipboard
-  reading are asked for once per app; the answers are listed in Manage.
+  reading are asked for once per app; the answers are listed in Manage. On a
+  local address (Linux) a remembered "Allow" holds for the program it was
+  given to, like a saved login: another program on that port is asked again.
   Files and folders a page opens through the File System Access API
   (`showOpenFilePicker` and the like) can be read once picked; changing one
   asks first, once per page and file or folder.
@@ -257,8 +259,8 @@ additions; its output is in the log behind "Show server output".
 ## Roadmap
 
 - App identity and native integration, in slices
-  ([docs/app-identity.md](docs/app-identity.md)): permissions bound to the
-  program, a partition per local HTML file, File System Access grants listed in
+  ([docs/app-identity.md](docs/app-identity.md)): a partition per local HTML
+  file, File System Access grants listed in
   Manage, Web App Manifest file handlers for standalone apps, and a private
   channel from Pane-started servers to Pane.
 

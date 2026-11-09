@@ -1500,12 +1500,17 @@ async function requestPermission(wc, permission, details) {
   const origin = originOf(details.requestingUrl || wc.getURL());
   const saved = keys.map(k => prefs.getPermission(origin, k));
   if (saved.includes(false)) return false;
-  if (saved.every(v => v === true)) return true;
+  // On a local origin a saved "Allow" holds for the programs it was given to (docs/app-identity.md).
+  const who = await originEvidence(origin).catch(() => null);
+  const local = who && who.local;
+  const ev = local && who.ev && !who.ev.conflict ? who.ev : null;
+  if (saved.every(v => v === true) && (!local || keys.every(k => identity.mayFill(prefs.getPermissionOwners(origin, k), who.ev)))) return true;
   const ref = `${origin} ${keys.join('+')}`;
-  if (!asking.has(ref)) asking.set(ref, ask(t, origin, keys, details).finally(() => asking.delete(ref)));
+  if (!asking.has(ref)) asking.set(ref, ask(t, origin, keys, details, ev).finally(() => asking.delete(ref)));
   return asking.get(ref);
 }
-async function ask(t, origin, keys, details) {
+// ev: the program on a local origin, to remember an "Allow" for.
+async function ask(t, origin, keys, details, ev = null) {
   const what = keys.length === 2 && keys.includes('camera') ? 'use your camera and microphone' : ASK[keys[0]];
   const { response, checkboxChecked } = await dialog.showMessageBox(windowOf(t), {
     type: 'question', message: `Allow ${t.label || t.title} to ${what}?`,
@@ -1514,7 +1519,13 @@ async function ask(t, origin, keys, details) {
     checkboxLabel: 'Remember for this app', checkboxChecked: true,
   });
   const allowed = response === 0;
-  if (checkboxChecked) { for (const k of keys) prefs.setPermission(origin, k, allowed); pushPermissions(); }
+  if (checkboxChecked) {
+    for (const k of keys) {
+      prefs.setPermission(origin, k, allowed);
+      if (allowed && ev) prefs.addPermissionOwner(origin, k, ev);
+    }
+    pushPermissions();
+  }
   return allowed;
 }
 // File System Access (showOpenFilePicker and friends): picking a file or folder in

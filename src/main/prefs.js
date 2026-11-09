@@ -10,7 +10,7 @@ const identity = require('./identity');
 const FILE = () => path.join(app.getPath('userData'), 'prefs.json');
 let data = { names: {}, windowed: [], windowsByDefault: false, bounds: {}, layout: 'grid', standalone: {},
              pins: [], zoom: {}, session: [], permissions: {},
-             appFolders: null, serverFolders: [], partitionUse: {}, appPartitions: {} };
+             appFolders: null, serverFolders: [], partitionUse: {}, appPartitions: {}, permissionOwners: {} };
 
 function load() {
   try { data = { ...data, ...JSON.parse(fs.readFileSync(FILE(), 'utf8')) }; } catch { /* first run */ }
@@ -104,6 +104,25 @@ function setPermission(origin, permission, allowed) {
   const o = data.permissions[origin] || (data.permissions[origin] = {});
   if (allowed === null) delete o[permission]; else o[permission] = allowed;
   if (!Object.keys(o).length) delete data.permissions[origin];
+  if (allowed !== true) setPermissionOwners(origin, permission, null);   // a block or a forget is for every program
+  save();
+}
+// On a local origin, the programs a saved "Allow" was given to (identity.js records):
+// permissionOwners[origin][permission] = [{ key, exe, cwd }]. Separate from the
+// true/false above, which Pane 0.4.3 keeps reading as before.
+function owners() { return data.permissionOwners && typeof data.permissionOwners === 'object' ? data.permissionOwners : (data.permissionOwners = {}); }
+function getPermissionOwners(origin, permission) { return owners()[origin]?.[permission]; }
+function setPermissionOwners(origin, permission, list) {
+  const all = owners();
+  const o = all[origin] || (all[origin] = {});
+  if (list) o[permission] = list; else delete o[permission];
+  if (!Object.keys(o).length) delete all[origin];
+}
+function addPermissionOwner(origin, permission, ev) {
+  const prev = getPermissionOwners(origin, permission);
+  const next = identity.addOwner(prev, ev);
+  if (next === prev) return;
+  setPermissionOwners(origin, permission, next);
   save();
 }
 function listPermissions() {
@@ -185,7 +204,7 @@ module.exports = {
   load, getName, setName, isWindowed, setWindowed, windowsByDefault, setWindowsByDefault, getBounds, setBounds,
   getLayout, setLayout, getStandalone, standaloneFor, setStandalone, listStandalone,
   listPins, getPin, isPinned, setPinned, updatePin, getZoom, setZoom, getSession, setSession,
-  getPermission, setPermission, listPermissions,
+  getPermission, setPermission, listPermissions, getPermissionOwners, addPermissionOwner,
   getAppFolders, listServerFolders, addServerFolder, rekey, notePartitionUse,
   ownedPartitions, setOwnedPartition, partitionRefs, partitionUses,
 };
