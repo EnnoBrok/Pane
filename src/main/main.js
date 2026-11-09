@@ -292,7 +292,7 @@ async function startServer(key, info) {
   starting.set(key, Date.now());
   try { child = launch.start(key, info.start); } catch (err) { fail(String(err.message || err)); return false; }
   if (child.pid) { launched.set(key, child.pid); launches.note(key, child.pid); }   // a pane.sh that execs its server keeps this pid
-  child.once('exit', () => launches.forget(child.pid));
+  child.once('exit', () => { launches.forget(child.pid); verdicts.clear(); });   // whatever it held is to be checked afresh
   child.once('error', (err) => fail(String(err.message || err)));
   // Exit code 0 can be a server that forked itself into the background.
   child.once('exit', (code, signal) => { if (code !== 0) fail(signal ? `It was ended by ${signal}.` : `It exited with code ${code}.`); });
@@ -1332,9 +1332,12 @@ function partitionFor(target) {
 }
 
 const guarded = new Set();
-const verdicts = new Map();   // port -> { key, at, ok: Promise<boolean> }, for a moment, so a page's requests share one check
+// port -> { key, sockets, at, ok: Promise<boolean> }: a page's requests share one check, but only
+// while the port's listening sockets are the same ones (identity.listenInodes), so a
+// program that takes the port over is always checked anew. Navigations are always checked.
+const verdicts = new Map();
 const blocked = new Map();    // port -> when a request to it was last refused
-const VERDICT_MS = 2000;
+const VERDICT_MS = 5000;
 function guardPartition(partition) {
   if (guarded.has(partition)) return;
   guarded.add(partition);
@@ -1345,20 +1348,24 @@ function guardPartition(partition) {
     let u;
     try { u = new URL(details.url); } catch { callback({}); return; }
     if (!key || !port || identity.portOf(u) !== port || !identity.isLocal(details.url)) { callback({}); return; }
-    servedBy(key, port).then((ok) => {
+    servedBy(key, port, details.resourceType === 'mainFrame' || details.resourceType === 'subFrame').then((ok) => {
       if (!ok) blocked.set(port, Date.now());
       callback({ cancel: !ok });
     }, () => callback({ cancel: true }));
   });
 }
-function servedBy(key, port) {
+function servedBy(key, port, fresh = false) {
+  const sockets = identity.listenInodes(port);
+  if (!sockets) return Promise.resolve(false);   // nobody listens
   const v = verdicts.get(port);
-  if (v && v.key === key && Date.now() - v.at < VERDICT_MS) return v.ok;
+  if (!fresh && v && v.key === key && v.sockets === sockets && Date.now() - v.at < VERDICT_MS) return v.ok;
   const ok = originEvidence(`http://127.0.0.1:${port}/`).then((who) => {
     const ev = who && who.ev;
+    // The port changed hands while it was being checked: no answer for either program.
+    if (identity.listenInodes(port) !== sockets) { verdicts.delete(port); return false; }
     return !!ev && !ev.conflict && (ev.launchedKey === key || isAppProcess(key, 0, ev.cwd));
   });
-  verdicts.set(port, { key, at: Date.now(), ok });
+  verdicts.set(port, { key, sockets, at: Date.now(), ok });
   return ok;
 }
 function blockedPort(url) {

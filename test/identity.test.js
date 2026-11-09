@@ -108,3 +108,23 @@ test('isLocal: loopback hosts, or the address a local listener was found on', ()
   assert.equal(id.portOf(new URL('https://x')), 443);
   assert.equal(id.portOf(new URL('http://x')), 80);
 });
+
+test('listenInodes: listening sockets on the port only, IPv4 and IPv6', () => {
+  const tcp = [
+    '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
+    '   0: 0100007F:2252 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 111 1 0 100 0 0 10 0',
+    '   1: 0100007F:2252 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 222 1 0 100 0 0 10 0',   // a connection, not a listener
+    '   2: 00000000:2253 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 333 1 0 100 0 0 10 0',
+  ].join('\n');
+  const tcp6 = [
+    '  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
+    '   0: 00000000000000000000000001000000:2252 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 444 1 0 100 0 0 10 0',
+  ].join('\n');
+  assert.deepEqual(id.parseListenInodes(tcp, 8786), ['111']);   // 0x2252
+  assert.deepEqual(id.parseListenInodes(tcp, 8787), ['333']);
+  assert.deepEqual(id.parseListenInodes(tcp, 80), []);
+  const files = { '/proc/net/tcp': tcp, '/proc/net/tcp6': tcp6 };
+  assert.equal(id.listenInodes(8786, (f) => files[f]), '111,444');
+  assert.equal(id.listenInodes(8786, (f) => { if (f.endsWith('6')) throw new Error('no ipv6'); return tcp; }), '111');
+  assert.equal(id.listenInodes(9999, (f) => files[f]), '');
+});

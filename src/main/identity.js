@@ -121,8 +121,28 @@ function isLocal(url, listeners = []) {
 }
 function portOf(u) { return Number(u.port) || (u.protocol === 'https:' ? 443 : 80); }
 
+// The sockets listening on a port, by inode, from /proc/net/tcp(6): another
+// program taking the port has to open a new socket, so the list changes. Lets a
+// check of who listens be reused exactly as long as nobody else can have taken
+// over, without starting a process. Lists every user's sockets.
+function parseListenInodes(text, port) {
+  const hex = Number(port).toString(16).toUpperCase().padStart(4, '0');
+  const out = [];
+  for (const line of String(text || '').split('\n').slice(1)) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 10 || f[3] !== '0A') continue;   // 0A: LISTEN
+    if (f[1].slice(f[1].lastIndexOf(':') + 1) === hex) out.push(f[9]);
+  }
+  return out;
+}
+function listenInodes(port, read = (file) => fs.readFileSync(file, 'utf8')) {
+  const all = [];
+  for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) { try { all.push(...parseListenInodes(read(file), port)); } catch { /* no IPv6 */ } }
+  return all.sort().join(',');
+}
+
 module.exports = {
   supported, LAUNCHED, RECOGNIZED, UNKNOWN,
   parseStat, createLaunches, evidenceOf, hasFingerprint, combine, level, mayFill,
-  addOwner, addUse, isLocal, portOf,
+  addOwner, addUse, isLocal, portOf, parseListenInodes, listenInodes,
 };

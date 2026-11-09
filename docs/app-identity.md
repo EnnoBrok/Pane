@@ -130,8 +130,11 @@ app, known by its folder, can *own* a partition, recorded in `appPartitions` in
 6. An app that owns a partition always opens in it, whoever is on the port.
    The partition is *guarded*: a request to the app's port goes out (with the
    app's cookies) only after a fresh check shows the app's own process
-   listening there. The result is reused for 2 s, so a page's requests share
-   one check. Otherwise the request is refused and the tab says another
+   listening there. Navigations are always checked. Other requests reuse
+   a result for up to 5 s, but only while the port's listening sockets (their
+   inodes in `/proc/net/tcp` and `tcp6`) are the same ones. A program that
+   takes the port over has to open a new socket, so it is always checked
+   anew. When a process Pane started exits, all results are dropped. Otherwise the request is refused and the tab says another
    program is answering on its port. Without this, a tab restored while
    another program held the port would load that program's page, either in the
    app's partition or in the shared one, and leave its cookies there.
@@ -149,8 +152,10 @@ upgrading again finds them intact.
 Known limits: an app whose server is not visible to Pane (Docker, another
 user's process) never shows its own process, so it never claims a partition
 and stays shared. If an app that owns a partition later runs that way, it is
-refused until it runs as its own process again. The 2 s reuse leaves a 2 s
-window after a port changes hands.
+refused until it runs as its own process again. What remains is the moment
+between the check and Chromium's connection, and a listening socket handed
+to another program (inherited across `exec` or passed over a Unix socket),
+which looks like the same socket.
 
 ## Later slices
 
