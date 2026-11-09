@@ -128,3 +128,12 @@ test('listenInodes: listening sockets on the port only, IPv4 and IPv6', () => {
   assert.equal(id.listenInodes(8786, (f) => { if (f.endsWith('6')) throw new Error('no ipv6'); return tcp; }), '111');
   assert.equal(id.listenInodes(9999, (f) => files[f]), '');
 });
+
+test('localPort: every port on this machine, since cookies ignore ports', () => {
+  assert.equal(id.localPort('http://127.0.0.1:18781/x'), 18781);
+  assert.equal(id.localPort('http://localhost/'), 80);
+  assert.equal(id.localPort('https://[::1]/'), 443);
+  assert.equal(id.localPort('https://example.com/'), 0);
+  assert.equal(id.localPort('ws://127.0.0.1:1/'), 0);
+  assert.equal(id.localPort('nonsense'), 0);
+});

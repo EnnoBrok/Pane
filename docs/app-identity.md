@@ -128,9 +128,13 @@ app, known by its folder, can *own* a partition, recorded in `appPartitions` in
    port is not an identity. Per-identity partitions for plain servers would
    need a key that includes the folder.
 6. An app that owns a partition always opens in it, whoever is on the port.
-   The partition is *guarded*: a request to the app's port goes out (with the
-   app's cookies) only after a fresh check shows the app's own process
-   listening there. Navigations are always checked. Other requests reuse
+   The partition is *guarded*: a request to any port on this machine goes out
+   (with the app's cookies) only after a fresh check shows the app's own
+   process listening there, whether Pane started it from the app's `pane.sh` or
+   it runs in the app's folder. That means every port, not just the app's own:
+   cookies are scoped to a host, not a port, so a cookie set by
+   `127.0.0.1:8770` also goes to `127.0.0.1:8771`. The app's own API server on
+   a second port passes; any other program is refused. Navigations are always checked. Other requests reuse
    a result for up to 5 s, but only while the port's listening sockets (their
    inodes in `/proc/net/tcp` and `tcp6`) are the same ones. A program that
    takes the port over has to open a new socket, so it is always checked
@@ -151,7 +155,8 @@ upgrading again finds them intact.
 
 Known limits: an app whose server is not visible to Pane (Docker, another
 user's process) never shows its own process, so it never claims a partition
-and stays shared. If an app that owns a partition later runs that way, it is
+and stays shared. The same goes for a second server of an app that owns a
+partition: if Pane can't see it as the app's own, its requests are refused. If an app that owns a partition later runs that way, it is
 refused until it runs as its own process again. What remains is the moment
 between the check and Chromium's connection, and a listening socket handed
 to another program (inherited across `exec` or passed over a Unix socket),

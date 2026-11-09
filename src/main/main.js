@@ -1335,7 +1335,7 @@ function partitionFor(target) {
 }
 
 const guarded = new Set();
-// port -> { key, sockets, at, ok: Promise<boolean> }: a page's requests share one check, but only
+// "<app key> <port>" -> { sockets, at, ok: Promise }: a page's requests share one check, but only
 // while the port's listening sockets are the same ones (identity.listenInodes), so a
 // program that takes the port over is always checked anew. Navigations are always checked.
 const verdicts = new Map();
@@ -1346,11 +1346,10 @@ function guardPartition(partition) {
   guarded.add(partition);
   session.fromPartition(partition).webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
     const key = partitions.ownerOf(partition, prefs.ownedPartitions());
-    const a = key && paneapps.get(key);
-    const port = a ? a.port : (prefs.ownedPartitions()[key] || {}).port;
-    let u;
-    try { u = new URL(details.url); } catch { callback({}); return; }
-    if (!key || !port || identity.portOf(u) !== port || !identity.isLocal(details.url)) { callback({}); return; }
+    // Every port on this machine, not just the app's: its cookies go to all of them.
+    // Another port passes only when the app's own process serves it (its API server, say).
+    const port = identity.localPort(details.url);
+    if (!key || !port) { callback({}); return; }
     servedBy(key, port, details.resourceType === 'mainFrame' || details.resourceType === 'subFrame').then(({ ok, holder }) => {
       if (!ok) blocked.set(port, { at: Date.now(), holder });
       callback({ cancel: !ok });
@@ -1361,17 +1360,18 @@ function guardPartition(partition) {
 function servedBy(key, port, fresh = false) {
   const sockets = identity.listenInodes(port);
   if (!sockets) return Promise.resolve({ ok: false, holder: null });   // nobody listens
-  const v = verdicts.get(port);
-  if (!fresh && v && v.key === key && v.sockets === sockets && Date.now() - v.at < VERDICT_MS) return v.ok;
+  const ref = `${key} ${port}`;
+  const v = verdicts.get(ref);
+  if (!fresh && v && v.sockets === sockets && Date.now() - v.at < VERDICT_MS) return v.ok;
   const ok = originEvidence(`http://127.0.0.1:${port}/`).then((who) => {
     const ev = who && who.ev;
     const l = who && who.listeners && who.listeners[0];
     const holder = l && l.name ? { name: `${l.name}${l.pid ? ` (pid ${l.pid})` : ''}`, dir: l.cwd || '' } : null;
     // The port changed hands while it was being checked: no answer for either program.
-    if (identity.listenInodes(port) !== sockets) { verdicts.delete(port); return { ok: false, holder }; }
+    if (identity.listenInodes(port) !== sockets) { verdicts.delete(ref); return { ok: false, holder }; }
     return { ok: !!ev && !ev.conflict && (ev.launchedKey === key || isAppProcess(key, 0, ev.cwd)), holder };
   });
-  verdicts.set(port, { key, sockets, at: Date.now(), ok });
+  verdicts.set(ref, { sockets, at: Date.now(), ok });
   return ok;
 }
 // Who holds the port, from the check that refused it: { text, dir } for the tab to show,

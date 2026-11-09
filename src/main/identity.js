@@ -120,6 +120,14 @@ function isLocal(url, listeners = []) {
   return listeners.some(l => l.port === port && l.reachHost === u.host.replace(/:\d+$/, ''));
 }
 function portOf(u) { return Number(u.port) || (u.protocol === 'https:' ? 443 : 80); }
+// The port a request to this machine goes to (loopback, http or https), else 0.
+// Cookies are per host, not per port: a cookie set by 127.0.0.1:8770 goes with
+// every request to 127.0.0.1, whatever the port, so all of them need checking.
+function localPort(url) {
+  let u;
+  try { u = new URL(url); } catch { return 0; }
+  return isLocal(url) ? portOf(u) : 0;
+}
 
 // The sockets listening on a port, by inode, from /proc/net/tcp(6): another
 // program taking the port has to open a new socket, so the list changes. Lets a
@@ -144,5 +152,5 @@ function listenInodes(port, read = (file) => fs.readFileSync(file, 'utf8')) {
 module.exports = {
   supported, LAUNCHED, RECOGNIZED, UNKNOWN,
   parseStat, createLaunches, evidenceOf, hasFingerprint, combine, level, mayFill,
-  addOwner, addUse, isLocal, portOf, parseListenInodes, listenInodes,
+  addOwner, addUse, isLocal, portOf, localPort, parseListenInodes, listenInodes,
 };
