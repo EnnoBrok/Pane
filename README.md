@@ -154,9 +154,11 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   (`~/Downloads/report.html`, `/srv/docs/index.html`, `C:\…`) or a `file://`
   URL into the search field, drop the file onto home, or start Pane with the
   file as an argument (`pane report.html`; a running instance opens it). They
-  are listed under "Files", get their `<title>` and `<link rel=icon>`, share
-  one cookie partition (`persist:files`), and show "offline" while the file is
-  missing. The tile menu has "Show in folder".
+  are listed under "Files", get their `<title>` and `<link rel=icon>`, each
+  get a storage partition of their own (all local files have the same origin,
+  so they would otherwise see each other's localStorage; files added before
+  Pane 0.4.4 keep sharing one until removed and added again), and show
+  "offline" while the file is missing. The tile menu has "Show in folder".
 - "Open with Pane": on start, a packaged Pane registers itself as a handler
   for HTML files (`src/main/register.js`): `~/.local/share/applications/pane.desktop`
   with `MimeType=text/html` on Linux, which also puts the AppImage into the app
@@ -259,10 +261,9 @@ additions; its output is in the log behind "Show server output".
 ## Roadmap
 
 - App identity and native integration, in slices
-  ([docs/app-identity.md](docs/app-identity.md)): a partition per local HTML
-  file, File System Access grants listed in
-  Manage, Web App Manifest file handlers for standalone apps, and a private
-  channel from Pane-started servers to Pane.
+  ([docs/app-identity.md](docs/app-identity.md)): File System Access grants
+  listed in Manage, Web App Manifest file handlers for standalone apps, and a
+  private channel from Pane-started servers to Pane.
 
 - Start pinned local apps on Windows too (needs another process's working
   folder, which Windows does not expose easily).

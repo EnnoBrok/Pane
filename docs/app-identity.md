@@ -171,10 +171,22 @@ with "Remember" adds that program. The owners are in `permissionOwners` in
 reading. A saved "Block" still holds for the whole origin: refusing a new
 program is the safe direction, and the Manage dialog undoes it.
 
-### 2c. Rest of the identity work
+## Slice 2c: a partition per local HTML file (implemented)
 
-- Local HTML files get one partition per file (or per folder) instead of the
-  shared `persist:files`.
+Every local HTML file has the origin `file://`, so in the one shared
+`persist:files` partition any file could read what another stored
+(localStorage, IndexedDB). Files now get `persist:file-<hash of URL>`
+(`partitions.filePartition`). Files Pane already knew when this was added
+(listed, pinned, in the reopen list or detached) were recorded once in
+`legacyFiles` in `prefs.json` and keep sharing `persist:files`. Who stored
+what there can't be told apart, so nothing is moved (invariant 5). Removing
+a file from Pane takes it off that list, so adding it again gives it its own
+partition. Pages a file opens by link stay in its partition. Pane 0.4.3 puts
+every file back into `persist:files`: the new partitions' data is then out of
+reach, but nothing leaks.
+
+### 2d. Rest of the identity work
+
 - High-value or long-lived grants are refused for plain-http network origins
   and for hosts whose certificate Pane accepted despite errors.
 - Optionally, ask the user when a partition with data has an unclear history,

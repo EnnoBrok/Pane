@@ -65,4 +65,12 @@ function decide(target, state) {
   return { partition: l, claim: true };                   // empty, or only this app ever used it
 }
 
-module.exports = { legacy, fresh, shared, ownerOf, dirName, inside, decide };
+// Local HTML files all have the origin file://, so in one partition every file
+// could read what any other stored (localStorage, IndexedDB). Files Pane already
+// knew when this was added (legacy) keep sharing persist:files; every other file
+// gets its own. Nothing moves, and Pane 0.4.3 puts them all back into persist:files.
+function filePartition(url, legacyFiles = []) {
+  return legacyFiles.includes(url) ? 'persist:files' : `persist:file-${crypto.createHash('sha1').update(url).digest('hex').slice(0, 12)}`;
+}
+
+module.exports = { legacy, fresh, shared, ownerOf, dirName, inside, decide, filePartition };

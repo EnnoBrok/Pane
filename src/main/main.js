@@ -380,7 +380,7 @@ function resolveTarget(sid) {
   if (n) {
     const host = netapps.hostOf(n.url);
     return { id: n.id, key: n.url, url: n.url, icon: n.icon, label: prefs.getName(n.url),
-             title: n.title || host, partition: netapps.isFile(n.url) ? 'persist:files' : `persist:net-${host}` };
+             title: n.title || host, partition: netapps.isFile(n.url) ? partitions.filePartition(n.url, prefs.getLegacyFiles()) : `persist:net-${host}` };
   }
   return null;
 }
@@ -1149,6 +1149,7 @@ function removeNet(id) {
   const n = netapps.get(id);
   if (n) for (const t of [...tabs.values()]) if (t.key === n.url) closeTab(t.id);
   if (n && prefs.isPinned(n.url)) unpin(n.url);
+  if (n && netapps.isFile(n.url)) prefs.dropLegacyFile(n.url);
   netapps.remove(id);
   pushNet();
 }
@@ -1314,7 +1315,8 @@ function isAppProcess(key, pid, cwd) {
 }
 function partitionFor(target) {
   const key = String(target.key || '');
-  if (/^(https?|file):/.test(key) || key.startsWith('link:')) return target.partition;   // network apps, files, links: as given
+  if (/^file:/.test(key)) return partitions.filePartition(key, prefs.getLegacyFiles());
+  if (/^https?:/.test(key) || key.startsWith('link:')) return target.partition;   // network apps, links: as given
   const a = paneapps.get(key);
   let port = a ? a.port : 0;
   if (!port) { try { port = identity.portOf(new URL(target.url)); } catch { return target.partition; } }
@@ -1692,6 +1694,7 @@ if (!app.requestSingleInstanceLock()) {
     passwords.load();
     hidden.load();
     prefs.load();
+    prefs.captureLegacyFiles(netapps.list().filter(a => a.file).map(a => a.url));   // once: files that already shared persist:files
     thumbs.onUpdate(() => { if (prefs.getLayout() === 'previews') { pushServers(); pushNet(); pushPins(); pushPaneApps(); } });
     // Started from a detached app's launcher entry: just that app, no home screen.
     refreshStandalone();

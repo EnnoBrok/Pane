@@ -10,7 +10,8 @@ const identity = require('./identity');
 const FILE = () => path.join(app.getPath('userData'), 'prefs.json');
 let data = { names: {}, windowed: [], windowsByDefault: false, bounds: {}, layout: 'grid', standalone: {},
              pins: [], zoom: {}, session: [], permissions: {},
-             appFolders: null, serverFolders: [], partitionUse: {}, appPartitions: {}, permissionOwners: {} };
+             appFolders: null, serverFolders: [], partitionUse: {}, appPartitions: {}, permissionOwners: {},
+             legacyFiles: null };
 
 function load() {
   try { data = { ...data, ...JSON.parse(fs.readFileSync(FILE(), 'utf8')) }; } catch { /* first run */ }
@@ -155,6 +156,21 @@ function partitionRefs() {
   return [...data.pins, ...getSession(), ...Object.values(data.standalone)]
     .filter(e => e && e.key && e.partition).map(e => ({ key: e.key, partition: e.partition }));
 }
+// Local HTML files that shared persist:files before files got partitions of their
+// own (partitions.filePartition): taken once, from what the old version left.
+function getLegacyFiles() { return Array.isArray(data.legacyFiles) ? data.legacyFiles : []; }
+function captureLegacyFiles(urls) {
+  if (Array.isArray(data.legacyFiles)) return;
+  const refs = [...data.pins, ...getSession(), ...Object.values(data.standalone)].map(e => e && e.key).filter(k => /^file:/.test(k || ''));
+  data.legacyFiles = [...new Set([...urls, ...refs])];
+  save();
+}
+// A file removed from Pane gets a partition of its own if it is added again.
+function dropLegacyFile(url) {
+  if (!getLegacyFiles().includes(url)) return;
+  data.legacyFiles = getLegacyFiles().filter(u => u !== url);
+  save();
+}
 function partitionUses() { return data.partitionUse && typeof data.partitionUse === 'object' ? data.partitionUse : {}; }
 
 // Where pane.sh apps are looked for (paneapps.js). appFolders: a list set by
@@ -206,5 +222,5 @@ module.exports = {
   listPins, getPin, isPinned, setPinned, updatePin, getZoom, setZoom, getSession, setSession,
   getPermission, setPermission, listPermissions, getPermissionOwners, addPermissionOwner,
   getAppFolders, listServerFolders, addServerFolder, rekey, notePartitionUse,
-  ownedPartitions, setOwnedPartition, partitionRefs, partitionUses,
+  ownedPartitions, setOwnedPartition, partitionRefs, partitionUses, getLegacyFiles, captureLegacyFiles, dropLegacyFile,
 };

@@ -101,3 +101,13 @@ test('inside', () => {
   assert.equal(p.inside('/h/ab', '/h/a'), false);
   assert.equal(p.inside('', '/h/a'), false);
 });
+
+test('filePartition: one per file, except the files that already shared persist:files', () => {
+  const a = 'file:///h/a.html';
+  const b = 'file:///h/b.html';
+  assert.match(p.filePartition(a), /^persist:file-[0-9a-f]{12}$/);
+  assert.notEqual(p.filePartition(a), p.filePartition(b));
+  assert.equal(p.filePartition(a), p.filePartition(a));   // the same file again: its storage comes back
+  assert.equal(p.filePartition(a, [a]), 'persist:files');
+  assert.equal(p.filePartition(b, [a]), p.filePartition(b));
+});
