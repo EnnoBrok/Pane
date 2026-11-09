@@ -171,8 +171,9 @@ which looks like the same socket.
 
 ### 3. File System Access done right
 
-- Ask before granting write access. Today `fileSystem` is not in `ASK`
-  (main.js), so it is granted without asking.
+- Done: write access is asked for, once per tab, page origin and file or
+  folder (a folder covers what is inside), and not remembered beyond that.
+  Reading what the user picked is not asked again: picking is the consent.
 - List grants in Manage and let the user revoke them.
 - Prototype only: keep grants across restarts by answering a reloaded
   page's `requestPermission()` from stored grants. Whether Electron routes that

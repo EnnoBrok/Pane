@@ -1479,6 +1479,7 @@ async function requestPermission(wc, permission, details) {
   const t = tabFor(wc);
   if (!t) return false;
   if (permission === 'openExternal' && /^(mailto|tel):/i.test(details.externalURL || '')) return true;
+  if (permission === 'fileSystem') return fileAccess(t, wc, details);
   const keys = permKeys(permission, details);
   if (!keys.some(k => ASK[k])) return true;
   const origin = originOf(details.requestingUrl || wc.getURL());
@@ -1501,6 +1502,37 @@ async function ask(t, origin, keys, details) {
   if (checkboxChecked) { for (const k of keys) prefs.setPermission(origin, k, allowed); pushPermissions(); }
   return allowed;
 }
+// File System Access (showOpenFilePicker and friends): picking a file or folder in
+// the system dialog is the consent to read it. Changing it asks first, once per
+// tab, page origin and file or folder; a folder covers what is inside. Like
+// Chrome, nothing is remembered beyond that (docs/app-identity.md).
+const writeGrants = new WeakMap();   // webContents -> Set of "<origin> <path>"
+async function fileAccess(t, wc, details) {
+  if (details.fileAccessType !== 'writable') return true;
+  const file = String(details.filePath || '');
+  const origin = originOf(details.requestingUrl || wc.getURL());
+  if (!file || !origin) return false;
+  let granted = writeGrants.get(wc);
+  if (!granted) writeGrants.set(wc, granted = new Set());
+  const covered = () => [...granted].some(g => g.startsWith(origin + ' ') && paneapps.inside(file, g.slice(origin.length + 1)));
+  if (covered()) return true;
+  const ref = `${wc.id} ${origin} ${file}`;
+  if (!asking.has(ref)) {
+    asking.set(ref, (async () => {
+      const name = t.label || t.title || origin;
+      const { response } = await dialog.showMessageBox(windowOf(t), {
+        type: 'question', noLink: true, buttons: ['Allow', 'Block'], defaultId: 0, cancelId: 1,
+        message: details.isDirectory ? `Allow ${name} to change files in “${path.basename(file) || file}”?`
+          : `Allow ${name} to save changes to “${path.basename(file)}”?`,
+        detail: `${file}\n\nAsked once while this page is open.`,
+      });
+      if (response === 0) granted.add(`${origin} ${file}`);
+      return response === 0;
+    })().finally(() => asking.delete(ref)));
+  }
+  return asking.get(ref);
+}
+
 // Checks (navigator.permissions, Notification.permission) say "granted" unless the user blocked it,
 // so apps go ahead and request, which is where Pane asks.
 function checkPermission(permission, origin, details) {

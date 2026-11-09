@@ -199,6 +199,9 @@ AppImages need `libfuse2`. Debian 13 ships only fuse3, so either install
   taskbar button.
 - Permissions: camera, microphone, location, screen recording and clipboard
   reading are asked for once per app; the answers are listed in Manage.
+  Files and folders a page opens through the File System Access API
+  (`showOpenFilePicker` and the like) can be read once picked; changing one
+  asks first, once per page and file or folder.
   Notifications, fullscreen and the like are granted.
 - While only app windows are open (no launcher), Pane does not scan ports; it
   just retries apps whose page failed.
