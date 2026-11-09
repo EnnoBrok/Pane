@@ -89,10 +89,18 @@ function showStatus(t) {
   const name = t.title || 'This app';
   const [h, p, button] = ['h3', 'p', 'button'].map(s => el.querySelector(s));
   el.classList.toggle('starting', !!t.starting);
+  p.title = '';
   button.hidden = !!t.starting;
   if (t.starting) {
     h.textContent = `Starting ${name}…`;
     p.textContent = 'It opens as soon as its server answers.';
+  } else if (t.blocked) {
+    // The app's cookie partition is guarded (docs/app-identity.md): another program holds its port.
+    h.textContent = `Another program is using ${name}’s port`;
+    p.textContent = `${t.blocked.text} It doesn’t get ${name}’s cookies or logins; this tab reloads once ${name} is back.`;
+    p.title = t.blocked.dir;   // the full folder, on hover
+    button.textContent = 'Retry now';
+    button.onclick = () => window.pane.retryTab(t.id);
   } else if (t.canStart) {
     h.textContent = `${name} isn’t running`;
     p.textContent = 'Start it from here; it also reloads by itself once it is back.';

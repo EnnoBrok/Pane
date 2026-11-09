@@ -453,7 +453,8 @@ function windowTitle(t) {
 function publicTab(t) {
   return { id: t.id, key: t.key, title: t.label || t.title, url: t.url, icon: t.icon, theme: t.theme, count: t.count || 0,
            loading: t.loading, failed: t.failed ? t.failed.desc : null,
-           starting: starting.has(t.key), canStart: canStart(t.key) && !(t.failed && t.failed.blocked) };
+           starting: starting.has(t.key), canStart: canStart(t.key) && !(t.failed && t.failed.blocked),
+           blocked: t.failed && t.failed.blocked ? t.failed.holder : null };
 }
 function pushTabs() {
   const counts = {};
@@ -665,7 +666,7 @@ function wire(t) {
     if (!isMainFrame || code === -3) return;   // -3: aborted by a newer navigation
     const blocked = code === -20 && blockedPort(url);   // the partition guard said no: not down, someone else is there
     const why = blocked ? 'another program is answering on its port' : desc.replace(/^ERR_/, '').toLowerCase().replace(/_/g, ' ');
-    t.failed = { url: url || t.url, desc: why, at: Date.now(), blocked };
+    t.failed = { url: url || t.url, desc: why, at: Date.now(), blocked, holder: blocked ? portText(url) : null };
     t.loading = false;
     relayout(t);
     notify(t);
@@ -1283,7 +1284,7 @@ async function originEvidence(url) {
   const listeners = (await listListeners()).filter(l => l.port === port && l.pid !== process.pid);
   if (!identity.isLocal(url, listeners)) return { local: false, ev: null };
   return {
-    local: true,
+    local: true, listeners,
     ev: identity.combine(listeners.map((l) => {
       const a = paneapps.match(l, launched);
       return identity.evidenceOf(l, a ? a.key : plainKey(l), launches);
@@ -1348,28 +1349,42 @@ function guardPartition(partition) {
     let u;
     try { u = new URL(details.url); } catch { callback({}); return; }
     if (!key || !port || identity.portOf(u) !== port || !identity.isLocal(details.url)) { callback({}); return; }
-    servedBy(key, port, details.resourceType === 'mainFrame' || details.resourceType === 'subFrame').then((ok) => {
-      if (!ok) blocked.set(port, Date.now());
+    servedBy(key, port, details.resourceType === 'mainFrame' || details.resourceType === 'subFrame').then(({ ok, holder }) => {
+      if (!ok) blocked.set(port, { at: Date.now(), holder });
       callback({ cancel: !ok });
     }, () => callback({ cancel: true }));
   });
 }
+// Resolves to { ok, holder }: holder describes who listens instead, for the tab to say.
 function servedBy(key, port, fresh = false) {
   const sockets = identity.listenInodes(port);
-  if (!sockets) return Promise.resolve(false);   // nobody listens
+  if (!sockets) return Promise.resolve({ ok: false, holder: null });   // nobody listens
   const v = verdicts.get(port);
   if (!fresh && v && v.key === key && v.sockets === sockets && Date.now() - v.at < VERDICT_MS) return v.ok;
   const ok = originEvidence(`http://127.0.0.1:${port}/`).then((who) => {
     const ev = who && who.ev;
+    const l = who && who.listeners && who.listeners[0];
+    const holder = l && l.name ? { name: `${l.name}${l.pid ? ` (pid ${l.pid})` : ''}`, dir: l.cwd || '' } : null;
     // The port changed hands while it was being checked: no answer for either program.
-    if (identity.listenInodes(port) !== sockets) { verdicts.delete(port); return false; }
-    return !!ev && !ev.conflict && (ev.launchedKey === key || isAppProcess(key, 0, ev.cwd));
+    if (identity.listenInodes(port) !== sockets) { verdicts.delete(port); return { ok: false, holder }; }
+    return { ok: !!ev && !ev.conflict && (ev.launchedKey === key || isAppProcess(key, 0, ev.cwd)), holder };
   });
   verdicts.set(port, { key, sockets, at: Date.now(), ok });
   return ok;
 }
+// Who holds the port, from the check that refused it: { text, dir } for the tab to show,
+// e.g. "python3 (pid 4242) from “tools” is listening on port 8770." with the full folder aside.
+function portText(url) {
+  try {
+    const port = identity.portOf(new URL(url));
+    const h = (blocked.get(port) || {}).holder;
+    if (!h) return { text: `Something else is listening on port ${port}.`, dir: '' };
+    const from = h.dir ? ` from “${path.basename(h.dir) || h.dir}”` : '';
+    return { text: `${h.name}${from} is listening on port ${port}.`, dir: h.dir };
+  } catch { return null; }
+}
 function blockedPort(url) {
-  try { const at = blocked.get(identity.portOf(new URL(url))); return !!at && Date.now() - at < 5000; } catch { return false; }
+  try { const b = blocked.get(identity.portOf(new URL(url))); return !!b && Date.now() - b.at < 5000; } catch { return false; }
 }
 
 // ---------- passwords ----------
