@@ -1351,7 +1351,7 @@ const VERDICT_MS = 5000;
 function guardPartition(partition) {
   if (guarded.has(partition)) return;
   guarded.add(partition);
-  session.fromPartition(partition).webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
+  session.fromPartition(partition).webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (details, callback) => {
     const key = partitions.ownerOf(partition, prefs.ownedPartitions());
     // Every port on this machine, not just the app's: its cookies go to all of them.
     // Another port passes only when the app's own process serves it (its API server, say).
@@ -1436,7 +1436,9 @@ ipcMain.on('pw:captured', async (e, { username, password } = {}) => {
     detail: `Stored ${passwords.backend()}.`,
     buttons: ['Save', 'Not now', 'Never for this site'], defaultId: 0, cancelId: 1, noLink: true,
   });
-  if (owner && !samePort(who)) owner = null;   // changed hands while the dialog was open: saved, but tied to nothing
+  // The page or the port changed while the dialog was open: the login is saved (the user said so for
+  // this host), but tied to no program, so it is filled in only after the next login typed by hand.
+  if (owner && (senderOrigin(e) !== origin || !samePort(who))) owner = null;
   if (response === 0) { passwords.set(origin, username, password, owner); pushPasswords(); }
   if (response === 2) passwords.addNever(origin);
 });
@@ -1561,6 +1563,8 @@ async function fileAccess(t, wc, details) {
   const covered = () => [...granted].some(g => g.startsWith(origin + ' ') && paneapps.inside(file, g.slice(origin.length + 1)));
   if (covered()) return true;
   const ref = `${wc.id} ${origin} ${file}`;
+  const port = identity.localPort(origin);   // a local page: its port must keep the same listener too
+  const sockets = port ? identity.listenInodes(port) : '';
   if (!asking.has(ref)) {
     asking.set(ref, (async () => {
       const name = t.label || t.title || origin;
@@ -1571,6 +1575,7 @@ async function fileAccess(t, wc, details) {
         detail: `${file}\n\nAsked once while this page is open.`,
       });
       if (response !== 0 || quitting || !samePage(wc, origin)) return false;   // not the page that asked any more
+      if (port && identity.listenInodes(port) !== sockets) return false;      // another program took the port meanwhile
       granted.add(`${origin} ${file}`);
       return true;
     })().finally(() => asking.delete(ref)));

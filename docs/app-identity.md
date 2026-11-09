@@ -80,7 +80,10 @@ one port at the moment of use.
    and File System Access writes. An answer from a dialog is used only if,
    once answered, the tab still shows the same origin and the port still has
    the same listening sockets. Dialogs are per tab, so one tab's open prompt
-   is never answered for another.
+   is never answered for another. A login the user agreed to save while the
+   page or port changed is still saved for the host the dialog named, but it
+   is not tied to any program, so it is filled in only after the next login
+   typed by hand.
 
 ## Slice 1: saved logins (implemented)
 
@@ -135,7 +138,8 @@ app, known by its folder, can *own* a partition, recorded in `appPartitions` in
    port is not an identity. Per-identity partitions for plain servers would
    need a key that includes the folder.
 6. An app that owns a partition always opens in it, whoever is on the port.
-   The partition is *guarded*: a request to any port on this machine goes out
+   The partition is *guarded*: a request (HTTP or a WebSocket handshake) to
+   any port on this machine goes out
    (with the app's cookies) only after a fresh check shows the app's own
    process listening there, whether Pane started it from the app's `pane.sh` or
    it runs in the app's folder. That means every port, not just the app's own:

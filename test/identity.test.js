@@ -134,6 +134,8 @@ test('localPort: every port on this machine, since cookies ignore ports', () => 
   assert.equal(id.localPort('http://localhost/'), 80);
   assert.equal(id.localPort('https://[::1]/'), 443);
   assert.equal(id.localPort('https://example.com/'), 0);
-  assert.equal(id.localPort('ws://127.0.0.1:1/'), 0);
+  assert.equal(id.localPort('ws://127.0.0.1:1/'), 1);        // a WebSocket handshake carries cookies as well
+  assert.equal(id.localPort('wss://localhost/'), 443);
+  assert.equal(id.localPort('ftp://127.0.0.1:21/'), 0);
   assert.equal(id.localPort('nonsense'), 0);
 });

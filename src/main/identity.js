@@ -114,13 +114,13 @@ function addUse(uses, ev, now = Date.now()) { return addTo(uses, ev, MAX_USES, {
 function isLocal(url, listeners = []) {
   let u;
   try { u = new URL(url); } catch { return false; }
-  if (!/^https?:$/.test(u.protocol)) return false;
+  if (!/^(https?|wss?):$/.test(u.protocol)) return false;   // WebSocket handshakes carry cookies too
   if (LOOPBACK.has(u.hostname)) return true;
   const port = portOf(u);
   return listeners.some(l => l.port === port && l.reachHost === u.host.replace(/:\d+$/, ''));
 }
-function portOf(u) { return Number(u.port) || (u.protocol === 'https:' ? 443 : 80); }
-// The port a request to this machine goes to (loopback, http or https), else 0.
+function portOf(u) { return Number(u.port) || (/^(https|wss):$/.test(u.protocol) ? 443 : 80); }
+// The port a request to this machine goes to (loopback; http, https, ws or wss), else 0.
 // Cookies are per host, not per port: a cookie set by 127.0.0.1:8770 goes with
 // every request to 127.0.0.1, whatever the port, so all of them need checking.
 function localPort(url) {
